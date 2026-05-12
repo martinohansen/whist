@@ -1,0 +1,246 @@
+{{define "content"}}
+<div class="stack">
+  {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+  {{if .Success}}<p class="success">{{.Success}}</p>{{end}}
+
+  <form action="/c/{{.Club.ID}}/settings/save" method="post" class="stack">
+
+    <h2 class="stat-label first">Klub</h2>
+    <div class="club-identity">
+      <label class="stack">
+        <span class="stat-label">Emoji</span>
+        <input type="hidden" name="emoji" id="emoji-input" value="{{.Club.Emoji}}" />
+        <button type="button" class="emoji-preview emoji-picker" id="emoji-picker"
+                title="Klik for at vælge en anden emoji">
+          {{if .Club.Emoji}}{{.Club.Emoji}}{{else}}🃏{{end}}
+        </button>
+      </label>
+      <label class="stack club-name-field">
+        <span class="stat-label">Navn</span>
+        <input type="text" name="name" id="club-name" value="{{.Club.Name}}" required />
+      </label>
+    </div>
+
+    <h2 class="stat-label">Regler</h2>
+    <p class="muted">Skriv klubbens regler. Almindelig tekst — vises som-er.</p>
+    <textarea name="rules" rows="8" class="rules-input"
+              placeholder="fx Vi spiller efter aftalte regler …">{{.Club.Rules}}</textarea>
+
+    <h2 class="stat-label">Meldinger</h2>
+    <p class="muted">
+      Normale meldinger kræver mindst det meldte antal stik. Nolo
+      (fx sol, ren sol) er det modsatte: meldsiden må højst få det
+      meldte antal stik. I nolo kan andre spillere vælge at gå med
+      melderen og spille på samme bet.
+    </p>
+
+    <table class="table meldings-table">
+      <thead>
+        <tr>
+          <th>Navn</th>
+          <th>Type</th>
+          <th class="num">Stik</th>
+          <th class="num">Point</th>
+          <th class="num"></th>
+        </tr>
+      </thead>
+      <tbody id="meldings-body">
+        {{range .Meldings}}
+        <tr>
+          <td><input type="text" name="melding_name" value="{{.Name}}" required /></td>
+          <td>
+            <select name="melding_type">
+              <option value="normal" {{if ne .Type "nolo"}}selected{{end}}>Normal</option>
+              <option value="nolo" {{if eq .Type "nolo"}}selected{{end}}>Nolo</option>
+            </select>
+          </td>
+          <td class="num"><input type="number" name="melding_bid" value="{{.Bid}}" min="0" max="13" required /></td>
+          <td class="num"><input type="number" name="melding_points" value="{{.Points}}" required /></td>
+          <td class="num"><button type="button" class="ghost row-remove">−</button></td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+    <div class="actions">
+      <button type="button" class="ghost" id="melding-add">+ Tilføj melding</button>
+    </div>
+
+    <h2 class="stat-label">Synlighed</h2>
+    <p class="muted">
+      Offentlige klubber kræver et kodeord og kan findes via søgning.
+      Private klubber kan ikke findes via søgning, men kan stadig deles
+      via direkte link til klubben.
+    </p>
+    <div class="visibility-row">
+      <div class="visibility-toggle" role="group" aria-label="Synlighed">
+        <input type="radio" name="visibility" id="vis-public" value="public"
+               {{if .PasswordEnabled}}checked{{end}} />
+        <label for="vis-public">Offentlig</label>
+        <input type="radio" name="visibility" id="vis-private" value="private"
+               {{if not .PasswordEnabled}}checked{{end}} />
+        <label for="vis-private">Privat</label>
+      </div>
+      <input type="password" name="password" id="password-input"
+             class="password-input"
+             placeholder="Kodeord"
+             {{if not .PasswordEnabled}}hidden{{end}} />
+    </div>
+
+    <h2 class="stat-label">Spillere</h2>
+    <p class="muted">
+      Skift spillers navn eller emoji. Spillere der har spillet kan ikke slettes.
+    </p>
+    <div class="players-list" id="players-list">
+      {{range .Players}}
+      <div class="player-edit-row">
+        <input type="hidden" name="player_id" value="{{.ID}}" />
+        <input type="hidden" name="player_emoji" value="{{.Emoji}}" class="player-emoji-input" />
+        <button type="button" class="emoji-preview emoji-picker player-emoji-btn"
+                title="Klik for at vælge en anden emoji">{{.Emoji}}</button>
+        <input type="text" name="player_name" value="{{.Name}}" required />
+        <button type="submit" class="ghost row-remove"
+                formaction="/c/{{$.Club.ID}}/players/{{.ID}}/delete"
+                formnovalidate
+                onclick="return confirm('Slet {{.Name}}?');">−</button>
+      </div>
+      {{end}}
+    </div>
+    <div class="actions">
+      <button type="button" class="ghost" id="player-add">+ Tilføj spiller</button>
+    </div>
+
+    <h2 class="stat-label">Sæsoner</h2>
+    <p class="muted">
+      Sæsoner afgrænser hvilke spil der tæller med i stillingen.
+      Datointervaller må ikke overlappe.
+    </p>
+    <div class="season-list" id="seasons-list">
+      {{range .Seasons}}
+      <div class="season-row">
+        <input type="hidden" name="season_id" value="{{.ID}}" />
+        <input type="text" name="season_name" value="{{.Name}}"
+               placeholder="Navn" aria-label="Navn" required />
+        <input type="date" name="season_start" value="{{.StartDate}}"
+               aria-label="Start" required />
+        <input type="date" name="season_end" value="{{.EndDate}}"
+               aria-label="Slut" />
+        <button type="submit" class="ghost row-remove"
+                formaction="/c/{{$.Club.ID}}/seasons/{{.ID}}/delete"
+                formnovalidate
+                onclick="return confirm('Slet sæsonen {{.Name}}?');">−</button>
+      </div>
+      {{end}}
+    </div>
+    <div class="actions">
+      <button type="button" class="ghost" id="season-add">+ Tilføj sæson</button>
+    </div>
+
+    <div class="actions">
+      <button type="submit">Gem</button>
+    </div>
+  </form>
+</div>
+<script>
+(function () {
+  // Meldings row add/remove
+  var body = document.getElementById("meldings-body");
+  document.getElementById("melding-add").addEventListener("click", function () {
+    var tr = document.createElement("tr");
+    tr.innerHTML =
+      '<td><input type="text" name="melding_name" required /></td>' +
+      '<td><select name="melding_type"><option value="normal" selected>Normal</option><option value="nolo">Nolo</option></select></td>' +
+      '<td class="num"><input type="number" name="melding_bid" min="0" max="13" value="7" required /></td>' +
+      '<td class="num"><input type="number" name="melding_points" value="1" required /></td>' +
+      '<td class="num"><button type="button" class="ghost row-remove">−</button></td>';
+    body.appendChild(tr);
+  });
+  body.addEventListener("click", function (e) {
+    var btn = e.target.closest(".row-remove");
+    if (!btn) return;
+    btn.closest("tr").remove();
+  });
+
+  // Emoji picker: cycle through the supported pool. The picker button cycles
+  // its sibling hidden input + own text. Works for the club emoji picker and
+  // per-player rows alike.
+  var emojiPool = {{json .EmojiPool}};
+  function wireEmojiPicker(btn, input) {
+    if (!btn || !input || !emojiPool.length) return;
+    var idx = emojiPool.indexOf(input.value);
+    if (idx < 0) idx = 0;
+    function set(i) {
+      idx = ((i % emojiPool.length) + emojiPool.length) % emojiPool.length;
+      input.value = emojiPool[idx];
+      btn.textContent = emojiPool[idx];
+    }
+    btn.addEventListener("click", function () { set(idx + 1); });
+    btn.addEventListener("contextmenu", function (e) {
+      e.preventDefault();
+      set(idx - 1);
+    });
+  }
+  wireEmojiPicker(document.getElementById("emoji-picker"),
+                  document.getElementById("emoji-input"));
+  function wirePlayerRow(row) {
+    wireEmojiPicker(row.querySelector(".player-emoji-btn"),
+                    row.querySelector(".player-emoji-input"));
+  }
+  document.querySelectorAll(".player-edit-row").forEach(wirePlayerRow);
+
+  // Add player: append a new row with a random starting emoji.
+  var playersList = document.getElementById("players-list");
+  document.getElementById("player-add").addEventListener("click", function () {
+    var emoji = emojiPool[Math.floor(Math.random() * emojiPool.length)] || "🐶";
+    var row = document.createElement("div");
+    row.className = "player-edit-row";
+    row.innerHTML =
+      '<input type="hidden" name="player_id" value="" />' +
+      '<input type="hidden" name="player_emoji" value="' + emoji + '" class="player-emoji-input" />' +
+      '<button type="button" class="emoji-preview emoji-picker player-emoji-btn">' + emoji + '</button>' +
+      '<input type="text" name="player_name" value="" placeholder="Navn" required />' +
+      '<button type="button" class="ghost row-remove">−</button>';
+    playersList.appendChild(row);
+    wirePlayerRow(row);
+  });
+  playersList.addEventListener("click", function (e) {
+    var btn = e.target.closest(".row-remove");
+    if (!btn || btn.type === "submit") return; // existing rows submit to server
+    btn.closest(".player-edit-row").remove();
+  });
+
+  // Add season: append a new row with empty fields.
+  var seasonsList = document.getElementById("seasons-list");
+  document.getElementById("season-add").addEventListener("click", function () {
+    var row = document.createElement("div");
+    row.className = "season-row";
+    row.innerHTML =
+      '<input type="hidden" name="season_id" value="" />' +
+      '<input type="text" name="season_name" value="" placeholder="Navn" aria-label="Navn" required />' +
+      '<input type="date" name="season_start" value="" aria-label="Start" required />' +
+      '<input type="date" name="season_end" value="" aria-label="Slut" />' +
+      '<button type="button" class="ghost row-remove">−</button>';
+    seasonsList.appendChild(row);
+  });
+  seasonsList.addEventListener("click", function (e) {
+    var btn = e.target.closest(".row-remove");
+    if (!btn || btn.type === "submit") return;
+    btn.closest(".season-row").remove();
+  });
+
+  // Visibility toggle: show/hide password input.
+  var pwInput = document.getElementById("password-input");
+  document.querySelectorAll('input[name="visibility"]').forEach(function (r) {
+    r.addEventListener("change", function () {
+      if (r.checked && r.value === "public") {
+        pwInput.hidden = false;
+        pwInput.required = true;
+      } else if (r.checked && r.value === "private") {
+        pwInput.hidden = true;
+        pwInput.required = false;
+        pwInput.value = "";
+      }
+    });
+  });
+})();
+</script>
+{{end}}

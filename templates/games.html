@@ -1,0 +1,32 @@
+{{define "content"}}
+{{if .Games}}
+<table class="table">
+  <thead>
+    <tr>
+      <th>Dato</th>
+      <th>Melding</th>
+      <th>Melder</th>
+      <th>Modstandere</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{range .Games}}
+    <tr>
+      <td>
+        <a href="/c/{{.ClubID}}/games/{{.ID}}">{{.PlayedAt.Format "2006-01-02"}}</a>
+      </td>
+      <td>{{.MeldingName}} ({{gameTricks .}}){{if .Note}} <span class="note-indicator" title="{{.Note}}">📝</span>{{end}}</td>
+      <td class="participants">
+        {{range .Scores}}{{if or (eq .Role "melder") (eq .Role "makker")}}<span title="{{.Player.Name}}">{{.Player.Emoji}}</span>{{end}}{{end}}
+      </td>
+      <td class="participants">
+        {{range .Scores}}{{if eq .Role "modspil"}}<span title="{{.Player.Name}}">{{.Player.Emoji}}</span>{{end}}{{end}}
+      </td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{else}}
+<p><em>Ingen spil endnu.</em> <a href="/c/{{.Club.ID}}/new">Tilføj det første</a>.</p>
+{{end}}
+{{end}}

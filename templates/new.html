@@ -1,0 +1,404 @@
+{{define "content"}}
+<div class="stack">
+  {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+
+  <form action="/c/{{.Club.ID}}/games/save" method="post" class="stack" id="new-game-form">
+    <div class="row-2">
+      <label class="stack">
+        <span class="stat-label">Dato</span>
+        <input type="date" name="played_at" value="{{.PlayedAt}}" />
+      </label>
+      <label class="stack">
+        <span class="stat-label">Melding</span>
+        <select name="melding_id" id="melding-select">
+          {{range .Meldings}}
+          <option value="{{.ID}}" data-bid="{{.Bid}}" data-points="{{.Points}}" data-type="{{.Type}}">{{.Name}} — {{.Points}} pt</option>
+          {{end}}
+        </select>
+      </label>
+    </div>
+
+    <h2 class="stat-label">Spillere</h2>
+    <p class="muted">
+      Klik for at vælge — i rækkefølgen melder, makker, modspil, modspil.
+      Klik igen for at fjerne. Venstre-/højreklik på stik justerer antallet;
+      de øvrige tilpasses så der altid er 13 stik i alt.
+    </p>
+
+    <div class="player-list" id="player-list">
+      {{range .Players}}
+      <div class="player-card" data-pid="{{.ID}}" data-name="{{.Name}}">
+        <input type="hidden" name="role_{{.ID}}" value="" class="role-input" />
+        <input type="hidden" name="tricks_{{.ID}}" value="0" class="tricks-input" />
+        <div class="player-card-main" data-action="role">
+          <span class="player-emoji">{{.Emoji}}</span>
+          <span class="player-name">{{.Name}}</span>
+          <span class="player-role-badge"></span>
+        </div>
+        <div class="player-tricks" data-action="tricks" title="Venstreklik: +1, højreklik: −1">
+          <span class="tricks-value">0</span>
+          <span class="tricks-label">stik</span>
+        </div>
+      </div>
+      {{end}}
+    </div>
+
+    <div class="inline-form">
+      <input type="text" id="new-player-name" placeholder="Tilføj spiller…" />
+      <button type="button" class="ghost" id="new-player-add">Tilføj</button>
+    </div>
+
+    <label class="stack">
+      <span class="stat-label">Note (valgfri)</span>
+      <input type="text" name="note" value="{{.Note}}" placeholder="fx Hjerter es, ren melding" />
+    </label>
+
+    <div class="score-summary">
+      <span>Beregnet score:</span>
+      <span id="score-summary-text" class="muted">vælg melding og stik</span>
+    </div>
+
+    <div class="actions">
+      <a href="/c/{{.Club.ID}}" class="link-padded">Annuller</a>
+      <button type="submit">Gem spil</button>
+    </div>
+  </form>
+</div>
+
+<script>
+{{template "new-game-script" .}}
+</script>
+{{end}}
+
+{{define "new-game-script"}}
+(function () {
+  const ROLE_LABEL = { "melder": "Melder", "makker": "Makker", "modspil": "Modspil" };
+  const ROLE_ICON = { "melder": "👑", "makker": "🤝", "modspil": "⚔️" };
+
+  const form = document.getElementById("new-game-form");
+  const meldingSelect = document.getElementById("melding-select");
+  const summary = document.getElementById("score-summary-text");
+  const cards = Array.from(document.querySelectorAll(".player-card"));
+
+  function isNolo() {
+    const opt = meldingSelect.selectedOptions[0];
+    return opt && opt.dataset.type === "nolo";
+  }
+
+  function getRole(card) { return card.dataset.role || ""; }
+  function getTricks(card) { return parseInt(card.querySelector(".tricks-input").value, 10) || 0; }
+
+  function setRole(card, role) {
+    card.querySelector(".role-input").value = role;
+    card.dataset.role = role;
+    card.classList.remove("role-melder", "role-makker", "role-modspil", "role-selected");
+    const badge = card.querySelector(".player-role-badge");
+    if (!role) {
+      badge.textContent = "";
+      return;
+    }
+    card.classList.add("role-" + role, "role-selected");
+    badge.textContent = (ROLE_ICON[role] || "") + " " + (ROLE_LABEL[role] || role);
+  }
+
+  function setTricksVal(card, n) {
+    if (n < 0) n = 0;
+    if (n > 13) n = 13;
+    card.querySelector(".tricks-input").value = n;
+    card.querySelector(".tricks-value").textContent = n;
+  }
+
+  function activeCards() {
+    return cards.filter(function (c) { return getRole(c) !== ""; });
+  }
+
+  // Count of each role currently assigned.
+  function roleCounts() {
+    const counts = { melder: 0, makker: 0, modspil: 0 };
+    cards.forEach(function (c) {
+      const r = getRole(c);
+      if (r in counts) counts[r]++;
+    });
+    return counts;
+  }
+
+  // Next role to claim, depending on melding type:
+  //   normal: 1 melder, 1 makker, 2 modspil
+  //   nolo:   1 melder, then 3 modspil; modspil can be promoted to makker.
+  function nextFreeSlot() {
+    const counts = roleCounts();
+    if (counts.melder < 1) return "melder";
+    if (isNolo()) {
+      if (counts.makker + counts.modspil < 3) return "modspil";
+      return "";
+    }
+    if (counts.makker < 1) return "makker";
+    if (counts.modspil < 2) return "modspil";
+    return "";
+  }
+
+  // Adjust tricks on card by delta, wrapping the card's own value 0..13,
+  // and redistribute the negation across the other active cards so the
+  // total stays at 13.
+  function adjustTricks(card, delta) {
+    const active = activeCards();
+    if (active.length < 2) {
+      const cur = getTricks(card);
+      let next = cur + delta;
+      next = ((next % 14) + 14) % 14;
+      setTricksVal(card, next);
+      return;
+    }
+    const cur = getTricks(card);
+    let next = cur + delta;
+    next = ((next % 14) + 14) % 14;
+    const realDelta = next - cur;
+    setTricksVal(card, next);
+
+    // Others must absorb -realDelta collectively.
+    let need = -realDelta;
+    if (need === 0) return;
+    let i = active.indexOf(card);
+    let safety = active.length * 14 + 4;
+    while (need !== 0 && safety-- > 0) {
+      i = (i + 1) % active.length;
+      const c = active[i];
+      if (c === card) continue;
+      const cv = getTricks(c);
+      if (need > 0 && cv < 13) {
+        setTricksVal(c, cv + 1);
+        need--;
+      } else if (need < 0 && cv > 0) {
+        setTricksVal(c, cv - 1);
+        need++;
+      }
+    }
+  }
+
+  // Sum of tricks across active cards; sets total to 13 by adjusting one card
+  // if necessary (used when initializing/applying defaults).
+  function normalizeTotal() {
+    const active = activeCards();
+    if (active.length === 0) return;
+    let sum = active.reduce(function (a, c) { return a + getTricks(c); }, 0);
+    let diff = 13 - sum;
+    let i = 0;
+    let safety = active.length * 14 + 4;
+    while (diff !== 0 && safety-- > 0) {
+      const c = active[i % active.length];
+      const cv = getTricks(c);
+      if (diff > 0 && cv < 13) { setTricksVal(c, cv + 1); diff--; }
+      else if (diff < 0 && cv > 0) { setTricksVal(c, cv - 1); diff++; }
+      i++;
+    }
+  }
+
+  function applyDefaultsForMelding() {
+    const opt = meldingSelect.selectedOptions[0];
+    if (!opt) return;
+    const bid = parseInt(opt.dataset.bid, 10);
+    const active = activeCards();
+    if (active.length !== 4) {
+      cards.forEach(function (c) { if (!getRole(c)) setTricksVal(c, 0); });
+      return;
+    }
+    if (isNolo()) {
+      // Each meld-side player independently aims for ≤ bid; default each
+      // to bid tricks (capped at 13 total) and split the remainder among
+      // modspil.
+      const counts = roleCounts();
+      const meldCount = counts.melder + counts.makker;
+      const modCount = counts.modspil;
+      const meldTotal = Math.min(meldCount * bid, 13);
+      const modTotal = 13 - meldTotal;
+      const meldEach = meldCount > 0 ? Math.floor(meldTotal / meldCount) : 0;
+      let meldExtra = meldTotal - meldEach * meldCount;
+      const modEach = modCount > 0 ? Math.floor(modTotal / modCount) : 0;
+      let modExtra = modTotal - modEach * modCount;
+      cards.forEach(function (c) {
+        const r = getRole(c);
+        if (r === "melder" || r === "makker") {
+          if (meldExtra > 0) { setTricksVal(c, meldEach + 1); meldExtra--; }
+          else setTricksVal(c, meldEach);
+        } else if (r === "modspil") {
+          if (modExtra > 0) { setTricksVal(c, modEach + 1); modExtra--; }
+          else setTricksVal(c, modEach);
+        } else setTricksVal(c, 0);
+      });
+      normalizeTotal();
+      return;
+    }
+    const meldEach = Math.floor(bid / 2);
+    const meldExtra = bid - meldEach * 2;
+    const rem = 13 - bid;
+    const modEach = Math.floor(rem / 2);
+    const modExtra = rem - modEach * 2;
+    let modGiven = 0;
+    cards.forEach(function (c) {
+      const r = getRole(c);
+      if (r === "melder") setTricksVal(c, meldEach + meldExtra);
+      else if (r === "makker") setTricksVal(c, meldEach);
+      else if (r === "modspil") {
+        if (modGiven === 0) { setTricksVal(c, modEach + modExtra); modGiven++; }
+        else setTricksVal(c, modEach);
+      } else setTricksVal(c, 0);
+    });
+    normalizeTotal();
+  }
+
+  function playerEmoji(card) {
+    const el = card.querySelector(".player-emoji");
+    return el ? el.textContent : "";
+  }
+  function fmtScore(n) { return (n >= 0 ? "+" : "") + n; }
+
+  function updateSummary() {
+    const opt = meldingSelect.selectedOptions[0];
+    if (!opt) return;
+    const bid = parseInt(opt.dataset.bid, 10);
+    const pts = parseInt(opt.dataset.points, 10);
+    const active = activeCards();
+    const counts = roleCounts();
+    if (isNolo()) {
+      const meldCount = counts.melder + counts.makker;
+      const modCount = counts.modspil;
+      if (active.length !== 4 || counts.melder !== 1 || meldCount + modCount !== 4) {
+        summary.textContent = "vælg melder og tre andre spillere";
+        return;
+      }
+      // Each meld-side player has an independent bet against modspil.
+      let sumPerOpp = 0;
+      const perCard = new Map();
+      active.forEach(function (c) {
+        const r = getRole(c);
+        if (r !== "melder" && r !== "makker") return;
+        const diff = bid - getTricks(c);
+        const p = diff >= 0 ? pts * (diff + 1) : pts * diff;
+        sumPerOpp += p;
+        perCard.set(c, modCount * p);
+      });
+      const modScore = -sumPerOpp;
+      const parts = [];
+      active.forEach(function (c) {
+        const r = getRole(c);
+        const sc = (r === "modspil") ? modScore : perCard.get(c);
+        parts.push(playerEmoji(c) + " " + fmtScore(sc));
+      });
+      summary.textContent = parts.join(" · ");
+      return;
+    }
+    if (active.length !== 4 || counts.melder !== 1 || counts.makker !== 1 || counts.modspil !== 2) {
+      summary.textContent = "vælg melder, makker og to modspillere";
+      return;
+    }
+    let meldTricks = 0;
+    active.forEach(function (c) {
+      const r = getRole(c);
+      if (r === "melder" || r === "makker") meldTricks += getTricks(c);
+    });
+    const diff = meldTricks - bid;
+    const meldScore = diff >= 0 ? pts * (diff + 1) : pts * diff;
+    const parts = [];
+    active.forEach(function (c) {
+      const r = getRole(c);
+      const sc = (r === "melder" || r === "makker") ? meldScore : -meldScore;
+      parts.push(playerEmoji(c) + " " + fmtScore(sc));
+    });
+    summary.textContent = parts.join(" · ");
+  }
+
+  cards.forEach(function (card) {
+    setRole(card, "");
+    setTricksVal(card, 0);
+
+    card.querySelector(".player-card-main").addEventListener("click", function () {
+      const cur = getRole(card);
+      if (!cur) {
+        const next = nextFreeSlot();
+        if (!next) return; // already 4 selected
+        setRole(card, next);
+      } else if (isNolo() && cur === "modspil") {
+        // Promote to makker — "go along" with the meld.
+        setRole(card, "makker");
+      } else {
+        // Release this card.
+        setRole(card, "");
+        setTricksVal(card, 0);
+      }
+      applyDefaultsForMelding();
+      updateSummary();
+    });
+
+    const tricksEl = card.querySelector(".player-tricks");
+    tricksEl.addEventListener("click", function () {
+      if (!getRole(card)) return;
+      adjustTricks(card, 1);
+      updateSummary();
+    });
+    tricksEl.addEventListener("contextmenu", function (e) {
+      e.preventDefault();
+      if (!getRole(card)) return;
+      adjustTricks(card, -1);
+      updateSummary();
+    });
+  });
+
+  meldingSelect.addEventListener("change", function () {
+    // Switching to normal: at most 1 makker. Demote extras to modspil if
+    // there's room (max 2), else release.
+    if (!isNolo()) {
+      let seenMakker = false;
+      cards.forEach(function (c) {
+        if (getRole(c) !== "makker") return;
+        if (!seenMakker) { seenMakker = true; return; }
+        const counts = roleCounts();
+        if (counts.modspil < 2) setRole(c, "modspil");
+        else setRole(c, "");
+      });
+    }
+    applyDefaultsForMelding();
+    updateSummary();
+  });
+
+  form.addEventListener("submit", function () {
+    cards.forEach(function (c) {
+      if (!getRole(c)) {
+        c.querySelector(".role-input").disabled = true;
+        c.querySelector(".tricks-input").disabled = true;
+      } else if (!c.querySelector('input[name="player_id"]')) {
+        const h = document.createElement("input");
+        h.type = "hidden";
+        h.name = "player_id";
+        h.value = c.dataset.pid;
+        c.appendChild(h);
+      }
+    });
+  });
+
+  // Inline player add (no nested <form>; we POST via fetch).
+  const newNameInput = document.getElementById("new-player-name");
+  const addBtn = document.getElementById("new-player-add");
+  function addPlayer() {
+    const name = (newNameInput.value || "").trim();
+    if (!name) return;
+    const body = new URLSearchParams();
+    body.set("name", name);
+    fetch("/c/{{.Club.ID}}/players/add", {
+      method: "POST",
+      body: body,
+      headers: { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" },
+      credentials: "same-origin",
+      redirect: "follow"
+    }).then(function () { window.location.reload(); });
+  }
+  addBtn.addEventListener("click", addPlayer);
+  newNameInput.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      addPlayer();
+    }
+  });
+
+  updateSummary();
+})();
+{{end}}

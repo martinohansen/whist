@@ -1,0 +1,11 @@
+{{define "content"}}
+<div class="stack">
+  <h2 class="stat-label">Adgang</h2>
+  <p>Indtast kodeordet for denne klub.</p>
+  {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+  <form method="post" class="inline-form">
+    <input type="password" name="password" placeholder="Kodeord" autofocus required />
+    <button type="submit">Lås op</button>
+  </form>
+</div>
+{{end}}

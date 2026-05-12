@@ -1,0 +1,65 @@
+{{define "layout"}}
+<!DOCTYPE html>
+<html lang="da">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta property="og:title" content="🃏" />
+    <meta property="og:type" content="website" />
+    <title>{{.Title}}</title>
+    <link rel="stylesheet" href="/static/app.css" />
+    <link rel="icon" href="/static/favicon.svg" />
+  </head>
+  <body>
+    <div class="container">
+      <nav class="nav">
+        <a href="/" class="brand" aria-label="Forside">🃏</a>
+        {{if .Club}}
+          <span class="club-name">{{if .Club.Emoji}}{{.Club.Emoji}} {{end}}{{.Club.Name}}</span>
+          <div class="nav-links">
+            <a href="/c/{{.Club.ID}}" {{if eq .Path (printf "/c/%s" .Club.ID)}}class="active"{{end}}>Stilling</a>
+            <a href="/c/{{.Club.ID}}/games" {{if eq .Path (printf "/c/%s/games" .Club.ID)}}class="active"{{end}}>Spil</a>
+            <a href="/c/{{.Club.ID}}/settings" {{if eq .Path (printf "/c/%s/settings" .Club.ID)}}class="active"{{end}}>Reglement</a>
+          </div>
+          <div class="nav-right">
+            {{if .Seasons}}
+            <form class="season-filter" aria-label="Sæson filter">
+              <label class="season-label">
+                <span class="sr-only">Sæson</span>
+                <select id="season-filter" name="season">
+                  <option value="0" {{if eq .SeasonID 0}}selected{{end}}>Alle sæsoner</option>
+                  {{range .Seasons}}
+                  <option value="{{.ID}}" {{if eq $.SeasonID .ID}}selected{{end}}>{{.Name}}</option>
+                  {{end}}
+                </select>
+              </label>
+            </form>
+            {{end}}
+            <a href="/c/{{.Club.ID}}/new" class="{{if eq .Path (printf "/c/%s/new" .Club.ID)}}active{{end}}">Nyt spil</a>
+          </div>
+        {{else}}
+          <a href="/clubs" {{if eq .Path "/clubs"}}class="active"{{end}}>Klubber</a>
+        {{end}}
+      </nav>
+      <main class="card">{{template "content" .}}</main>
+      <footer class="footer">
+        <span><a href="https://github.com/martinohansen/whist">GitHub</a></span>
+        <span class="footer-sep">|</span>
+        <span><a href="https://buymeacoffee.com/martinlikesfilter">Buy me a coffee</a></span>
+        <span class="footer-version">{{version}}</span>
+      </footer>
+    </div>
+    <script>
+      (function () {
+        var sel = document.getElementById("season-filter");
+        if (!sel) return;
+        sel.addEventListener("change", function () {
+          var url = new URL(window.location.href);
+          url.searchParams.set("season", sel.value || "0");
+          window.location.href = url.toString();
+        });
+      })();
+    </script>
+  </body>
+</html>
+{{end}}

@@ -1,0 +1,40 @@
+{{define "content"}}
+<div class="stack">
+  <div class="game-header">
+    <h2 class="stat-label">Spil #{{.Game.ID}} — {{.Game.MeldingName}} ({{.Game.Bid}})</h2>
+    <span class="badge">{{.Game.PlayedAt.Format "2006-01-02"}}</span>
+  </div>
+
+  <table class="table">
+    <thead>
+      <tr>
+        <th class="name">Spiller</th>
+        <th>Rolle</th>
+        <th class="num">Stik</th>
+        <th class="num">Point</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Game.Scores}}
+      <tr>
+        <td class="name"><span>{{.Player.Emoji}}</span> {{.Player.Name}}</td>
+        <td>{{roleIcon .Role}} {{roleLabel .Role}}</td>
+        <td class="num">{{.Tricks}}</td>
+        <td class="num"><strong>{{.Score}}</strong></td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+
+  {{if .Game.Note}}
+  <h2 class="stat-label">Note</h2>
+  <p>{{.Game.Note}}</p>
+  {{end}}
+
+  <form action="/c/{{.Club.ID}}/games/{{.Game.ID}}/delete" method="post" class="actions"
+        onsubmit="return confirm('Slet dette spil?');">
+    <a href="/c/{{.Club.ID}}/games" class="link-padded">Tilbage</a>
+    <button type="submit" class="danger">Slet spil</button>
+  </form>
+</div>
+{{end}}

@@ -1,0 +1,41 @@
+{{define "content"}}
+<div class="stack">
+  {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+
+  {{if .Recents}}
+  <h2 class="stat-label">Seneste klubber</h2>
+  <div class="list">
+    {{range .Recents}}
+    <a class="list-item" href="/c/{{.ID}}">
+      <span class="club-emoji">{{if .Emoji}}{{.Emoji}}{{else}}🃏{{end}}</span>
+      <span class="club-name-plain">{{.Name}}</span>
+    </a>
+    {{end}}
+  </div>
+  {{end}}
+
+  <h2 class="stat-label">Søg efter klub</h2>
+  <p class="muted">
+    Kun klubber med kodeord kan findes via søgning. Klubber uden kodeord
+    kan kun tilgås via direkte link.
+  </p>
+  <form action="/clubs" method="get" class="inline-form">
+    <input type="text" name="q" placeholder="Navn på klub" value="{{.Query}}" autofocus />
+    <button type="submit">Søg</button>
+  </form>
+  {{if .Searched}}
+    {{if .Matches}}
+    <div class="list">
+      {{range .Matches}}
+      <a class="list-item" href="/c/{{.ID}}">
+        <span>{{if .Emoji}}{{.Emoji}}{{else}}🃏{{end}}</span>
+        <span>{{.Name}}</span>
+      </a>
+      {{end}}
+    </div>
+    {{else}}
+    <p class="muted"><em>Ingen klubber matchede {{.Query}}.</em></p>
+    {{end}}
+  {{end}}
+</div>
+{{end}}

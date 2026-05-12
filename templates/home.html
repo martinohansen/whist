@@ -1,0 +1,25 @@
+{{define "content"}}
+<div class="stack">
+  {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+
+  <h2 class="stat-label">Seneste klubber</h2>
+  {{if .Recents}}
+  <div class="list">
+    {{range .Recents}}
+    <a class="list-item" href="/c/{{.ID}}">
+      <span class="club-emoji">{{if .Emoji}}{{.Emoji}}{{else}}🃏{{end}}</span>
+      <span class="club-name-plain">{{.Name}}</span>
+    </a>
+    {{end}}
+  </div>
+  {{else}}
+  <p class="muted">Ingen besøgte klubber endnu.</p>
+  {{end}}
+
+  <h2 class="stat-label">Opret klub</h2>
+  <form action="/clubs/new" method="post" class="inline-form">
+    <input type="text" name="name" placeholder="Klubbens navn" required />
+    <button type="submit">Opret</button>
+  </form>
+</div>
+{{end}}
