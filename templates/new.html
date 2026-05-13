@@ -2,6 +2,28 @@
 <div class="stack">
   {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
 
+  <form action="/c/{{.Club.ID}}/import/analyze" method="post" enctype="multipart/form-data" id="quick-import-form" class="import-banner">
+    <label class="import-banner-link" for="quick-import-input">
+      <span class="import-banner-icon">📷</span>
+      <span id="quick-import-text">Importér en hel aften fra et foto af papirsedlen</span>
+    </label>
+    <input type="file" id="quick-import-input" name="image" accept="image/*" capture="environment" multiple hidden />
+  </form>
+  <script>
+  (function () {
+    var input = document.getElementById("quick-import-input");
+    var form = document.getElementById("quick-import-form");
+    var text = document.getElementById("quick-import-text");
+    if (!input || !form) return;
+    input.addEventListener("change", function () {
+      if (!input.files || input.files.length === 0) return;
+      if (text) text.innerHTML = 'Analyserer<span class="loading-dots"></span>';
+      form.classList.add("import-banner--loading");
+      form.submit();
+    });
+  })();
+  </script>
+
   <form action="/c/{{.Club.ID}}/games/save" method="post" class="stack" id="new-game-form">
     <div class="row-2">
       <label class="stack">
@@ -49,7 +71,7 @@
     </div>
 
     <label class="stack">
-      <span class="stat-label">Note (valgfri)</span>
+      <span class="stat-label">Note</span>
       <input type="text" name="note" value="{{.Note}}" placeholder="fx Hjerter es, ren melding" />
     </label>
 

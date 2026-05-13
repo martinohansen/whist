@@ -1,0 +1,438 @@
+{{define "content"}}
+<div class="stack">
+  <h1 style="margin-top:0">Gennemgå importerede spil</h1>
+
+  {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+  {{if .Success}}<p class="success">{{.Success}}</p>{{end}}
+
+  {{if not .Drafts}}
+    <p class="muted">Ingen drafts ventende.</p>
+  {{else}}
+    <div class="bulk-date-row">
+      <label class="stack" style="flex:1">
+        <span class="stat-label">Sæt dato for alle</span>
+        <input type="date" id="bulk-date" value="{{.BulkDate}}" />
+      </label>
+      <button type="button" class="ghost" id="bulk-date-apply">Anvend på alle</button>
+    </div>
+
+    <div class="stack" id="drafts-list">
+      {{range .Drafts}}
+      <div class="draft-card {{if not .Valid}}draft-card--invalid{{end}}"
+           data-draft-id="{{.ID}}"
+           data-melding-id="{{.MeldingID}}">
+        <div class="draft-card-head">
+          <span class="autosave-indicator muted" hidden>Gemt</span>
+          <button type="button" class="ghost danger-text" data-delete-draft="{{.ID}}">Slet</button>
+        </div>
+
+        <div class="row-2">
+          <label class="stack">
+            <span class="stat-label">Dato</span>
+            <input type="date" data-field="played_at" value="{{.PlayedAtStr}}" />
+          </label>
+          <label class="stack">
+            <span class="stat-label">Melding</span>
+            <select data-field="melding_id">
+              <option value="0">— vælg —</option>
+              {{range $.Meldings}}
+              <option value="{{.ID}}" data-bid="{{.Bid}}" data-points="{{.Points}}" data-type="{{.Type}}">{{.Name}} — {{.Points}} pt</option>
+              {{end}}
+            </select>
+          </label>
+        </div>
+
+        <h2 class="stat-label">Spillere</h2>
+        <div class="player-list">
+          {{$scores := .Scores}}
+          {{range $.Players}}
+          {{$pid := .ID}}
+          <div class="player-card" data-pid="{{.ID}}" data-name="{{.Name}}">
+            <div class="player-card-main" data-action="role">
+              <span class="player-emoji">{{.Emoji}}</span>
+              <span class="player-name">{{.Name}}</span>
+              <span class="player-role-badge"></span>
+            </div>
+            <div class="player-tricks" data-action="tricks" title="Venstreklik: +1, højreklik: −1">
+              <span class="tricks-value">0</span>
+              <span class="tricks-label">stik</span>
+            </div>
+            <input type="hidden" class="initial-role" value="{{range $scores}}{{if eq .PlayerID $pid}}{{.Role}}{{end}}{{end}}" />
+            <input type="hidden" class="initial-tricks" value="{{range $scores}}{{if eq .PlayerID $pid}}{{.Tricks}}{{end}}{{end}}" />
+          </div>
+          {{end}}
+        </div>
+
+        <label class="stack" style="margin-top:var(--spacing-md)">
+          <span class="stat-label">Note</span>
+          <input type="text" data-field="note" value="{{.Note}}" placeholder="fx Hjerter es, ren melding" />
+        </label>
+
+        <div class="score-summary">
+          <span>Beregnet score:</span>
+          <span class="score-summary-text muted">vælg melding og stik</span>
+        </div>
+
+        <ul class="draft-issues" {{if .Valid}}hidden{{end}}>
+          {{range .Issues}}<li>⚠ {{.}}</li>{{end}}
+        </ul>
+      </div>
+      {{end}}
+    </div>
+
+    <div class="actions" style="justify-content:space-between;margin-top:24px">
+      <form action="/c/{{.Club.ID}}/import/analyze" method="post" enctype="multipart/form-data" id="more-import-form" style="margin:0">
+        <label for="more-import-input" class="link-padded" style="cursor:pointer">+ Flere billeder</label>
+        <input type="file" id="more-import-input" name="image" accept="image/*" capture="environment" multiple hidden />
+      </form>
+      <div class="actions" style="margin:0">
+        <form method="post" action="/c/{{.Club.ID}}/import/reject" style="margin:0">
+          <button type="submit" class="ghost danger-text">Afvis alle</button>
+        </form>
+        <form method="post" action="/c/{{.Club.ID}}/import/approve" style="margin:0">
+          <button type="submit" id="approve-btn">Godkend alle ({{len .Drafts}})</button>
+        </form>
+      </div>
+    </div>
+
+    <script>
+    {{template "import-review-script" .}}
+    </script>
+  {{end}}
+</div>
+{{end}}
+
+{{define "import-review-script"}}
+(function () {
+  const ROLE_LABEL = { "melder": "Melder", "makker": "Makker", "modspil": "Modspil" };
+  const ROLE_ICON = { "melder": "👑", "makker": "🤝", "modspil": "⚔️" };
+  const clubID = {{ .Club.ID | js }};
+
+  function setRole(card, role) {
+    card.dataset.role = role;
+    card.classList.remove("role-melder", "role-makker", "role-modspil", "role-selected");
+    const badge = card.querySelector(".player-role-badge");
+    if (!role) { badge.textContent = ""; return; }
+    card.classList.add("role-" + role, "role-selected");
+    badge.textContent = (ROLE_ICON[role] || "") + " " + (ROLE_LABEL[role] || role);
+  }
+  function getRole(card) { return card.dataset.role || ""; }
+  function setTricksVal(card, n) {
+    if (n < 0) n = 0;
+    if (n > 13) n = 13;
+    card.dataset.tricks = n;
+    card.querySelector(".tricks-value").textContent = n;
+  }
+  function getTricks(card) { return parseInt(card.dataset.tricks || "0", 10) || 0; }
+
+  function initDraft(draftCard) {
+    const draftID = draftCard.dataset.draftId;
+    const meldingSelect = draftCard.querySelector('[data-field="melding_id"]');
+    const dateInput = draftCard.querySelector('[data-field="played_at"]');
+    const noteInput = draftCard.querySelector('[data-field="note"]');
+    const cards = Array.from(draftCard.querySelectorAll(".player-card"));
+    const issuesEl = draftCard.querySelector(".draft-issues");
+    const savedEl = draftCard.querySelector(".autosave-indicator");
+
+    // Pre-fill melding
+    if (draftCard.dataset.meldingId && draftCard.dataset.meldingId !== "0") {
+      meldingSelect.value = draftCard.dataset.meldingId;
+    }
+    // Pre-fill role/tricks for cards that had scores
+    cards.forEach(function (c) {
+      const initRole = (c.querySelector(".initial-role").value || "").trim();
+      const initTricks = (c.querySelector(".initial-tricks").value || "").trim();
+      if (initRole) {
+        setRole(c, initRole);
+        setTricksVal(c, parseInt(initTricks, 10) || 0);
+      } else {
+        setRole(c, "");
+        setTricksVal(c, 0);
+      }
+    });
+
+    function isNolo() {
+      const opt = meldingSelect.selectedOptions[0];
+      return opt && opt.dataset.type === "nolo";
+    }
+    function activeCards() { return cards.filter(function (c) { return getRole(c) !== ""; }); }
+    function roleCounts() {
+      const counts = { melder: 0, makker: 0, modspil: 0 };
+      cards.forEach(function (c) { const r = getRole(c); if (r in counts) counts[r]++; });
+      return counts;
+    }
+    function nextFreeSlot() {
+      const counts = roleCounts();
+      if (counts.melder < 1) return "melder";
+      if (isNolo()) {
+        if (counts.makker + counts.modspil < 3) return "modspil";
+        return "";
+      }
+      if (counts.makker < 1) return "makker";
+      if (counts.modspil < 2) return "modspil";
+      return "";
+    }
+    function adjustTricks(card, delta) {
+      const active = activeCards();
+      if (active.length < 2) {
+        const cur = getTricks(card);
+        let next = cur + delta;
+        next = ((next % 14) + 14) % 14;
+        setTricksVal(card, next);
+        return;
+      }
+      const cur = getTricks(card);
+      let next = cur + delta;
+      next = ((next % 14) + 14) % 14;
+      const realDelta = next - cur;
+      setTricksVal(card, next);
+      let need = -realDelta;
+      if (need === 0) return;
+      let i = active.indexOf(card);
+      let safety = active.length * 14 + 4;
+      while (need !== 0 && safety-- > 0) {
+        i = (i + 1) % active.length;
+        const c = active[i];
+        if (c === card) continue;
+        const cv = getTricks(c);
+        if (need > 0 && cv < 13) { setTricksVal(c, cv + 1); need--; }
+        else if (need < 0 && cv > 0) { setTricksVal(c, cv - 1); need++; }
+      }
+    }
+
+    function computeIssues() {
+      const issues = [];
+      const meldID = parseInt(meldingSelect.value, 10) || 0;
+      const active = activeCards();
+      const counts = roleCounts();
+      if (meldID === 0) issues.push("Vælg en melding");
+      if (active.length !== 4) issues.push("Skal have 4 spillere");
+      if (counts.melder !== 1) issues.push("Præcis én melder");
+      if (isNolo()) {
+        if (counts.makker + counts.modspil !== 3) issues.push("Skal have tre makkere/modspil");
+      } else if (meldID !== 0) {
+        if (counts.makker !== 1) issues.push("Præcis én makker");
+        if (counts.modspil !== 2) issues.push("Præcis to modspil");
+        let sum = 0;
+        active.forEach(function (c) { sum += getTricks(c); });
+        if (sum !== 13) issues.push("Stik skal være 13 i alt");
+      }
+      return issues;
+    }
+
+    function updateIssuesUI() {
+      const issues = computeIssues();
+      issuesEl.innerHTML = "";
+      if (issues.length === 0) {
+        issuesEl.setAttribute("hidden", "");
+        draftCard.classList.remove("draft-card--invalid");
+      } else {
+        issues.forEach(function (msg) {
+          const li = document.createElement("li");
+          li.textContent = "⚠ " + msg;
+          issuesEl.appendChild(li);
+        });
+        issuesEl.removeAttribute("hidden");
+        draftCard.classList.add("draft-card--invalid");
+      }
+      updateSummary();
+      refreshApproveBtn();
+    }
+
+    const summary = draftCard.querySelector(".score-summary-text");
+    function playerEmoji(card) {
+      const el = card.querySelector(".player-emoji");
+      return el ? el.textContent : "";
+    }
+    function fmtScore(n) { return (n >= 0 ? "+" : "") + n; }
+    function updateSummary() {
+      if (!summary) return;
+      const opt = meldingSelect.selectedOptions[0];
+      if (!opt || opt.value === "0") { summary.textContent = "vælg melding og stik"; return; }
+      const bid = parseInt(opt.dataset.bid, 10);
+      const pts = parseInt(opt.dataset.points, 10);
+      const active = activeCards();
+      const counts = roleCounts();
+      if (isNolo()) {
+        const meldCount = counts.melder + counts.makker;
+        const modCount = counts.modspil;
+        if (active.length !== 4 || counts.melder !== 1 || meldCount + modCount !== 4) {
+          summary.textContent = "vælg melder og tre andre spillere"; return;
+        }
+        let sumPerOpp = 0;
+        const perCard = new Map();
+        active.forEach(function (c) {
+          const r = getRole(c);
+          if (r !== "melder" && r !== "makker") return;
+          const diff = bid - getTricks(c);
+          const p = diff >= 0 ? pts * (diff + 1) : pts * diff;
+          sumPerOpp += p;
+          perCard.set(c, modCount * p);
+        });
+        const modScore = -sumPerOpp;
+        const parts = [];
+        active.forEach(function (c) {
+          const r = getRole(c);
+          const sc = (r === "modspil") ? modScore : perCard.get(c);
+          parts.push(playerEmoji(c) + " " + fmtScore(sc));
+        });
+        summary.textContent = parts.join(" · ");
+        return;
+      }
+      if (active.length !== 4 || counts.melder !== 1 || counts.makker !== 1 || counts.modspil !== 2) {
+        summary.textContent = "vælg melder, makker og to modspillere"; return;
+      }
+      let meldTricks = 0;
+      active.forEach(function (c) {
+        const r = getRole(c);
+        if (r === "melder" || r === "makker") meldTricks += getTricks(c);
+      });
+      const diff = meldTricks - bid;
+      const meldScore = diff >= 0 ? pts * (diff + 1) : pts * diff;
+      const parts = [];
+      active.forEach(function (c) {
+        const r = getRole(c);
+        const sc = (r === "melder" || r === "makker") ? meldScore : -meldScore;
+        parts.push(playerEmoji(c) + " " + fmtScore(sc));
+      });
+      summary.textContent = parts.join(" · ");
+    }
+
+    function buildFormData() {
+      const fd = new FormData();
+      fd.set("played_at", dateInput.value || "");
+      fd.set("melding_id", meldingSelect.value || "0");
+      fd.set("note", noteInput.value || "");
+      const active = activeCards();
+      active.forEach(function (c, i) {
+        fd.set("player_id_" + i, c.dataset.pid);
+        fd.set("raw_name_" + i, c.dataset.name);
+        fd.set("role_" + i, getRole(c));
+        fd.set("tricks_" + i, String(getTricks(c)));
+      });
+      return fd;
+    }
+
+    let saveTimer = null;
+    let savedTimer = null;
+    function scheduleSave() {
+      updateIssuesUI();
+      if (saveTimer) clearTimeout(saveTimer);
+      saveTimer = setTimeout(function () {
+        fetch("/c/" + clubID + "/import/" + draftID + "/save", {
+          method: "POST",
+          body: buildFormData(),
+          credentials: "same-origin",
+          redirect: "manual"
+        }).then(function () {
+          if (savedEl) {
+            savedEl.removeAttribute("hidden");
+            if (savedTimer) clearTimeout(savedTimer);
+            savedTimer = setTimeout(function () { savedEl.setAttribute("hidden", ""); }, 1200);
+          }
+        }).catch(function () {});
+      }, 250);
+    }
+
+    cards.forEach(function (card) {
+      card.querySelector(".player-card-main").addEventListener("click", function () {
+        const cur = getRole(card);
+        if (!cur) {
+          const next = nextFreeSlot();
+          if (!next) return;
+          setRole(card, next);
+        } else if (isNolo() && cur === "modspil") {
+          setRole(card, "makker");
+        } else {
+          setRole(card, "");
+          setTricksVal(card, 0);
+        }
+        scheduleSave();
+      });
+      const tricksEl = card.querySelector(".player-tricks");
+      tricksEl.addEventListener("click", function () {
+        if (!getRole(card)) return;
+        adjustTricks(card, 1);
+        scheduleSave();
+      });
+      tricksEl.addEventListener("contextmenu", function (e) {
+        e.preventDefault();
+        if (!getRole(card)) return;
+        adjustTricks(card, -1);
+        scheduleSave();
+      });
+    });
+
+    meldingSelect.addEventListener("change", function () {
+      if (!isNolo()) {
+        let seenMakker = false;
+        cards.forEach(function (c) {
+          if (getRole(c) !== "makker") return;
+          if (!seenMakker) { seenMakker = true; return; }
+          const counts = roleCounts();
+          if (counts.modspil < 2) setRole(c, "modspil");
+          else setRole(c, "");
+        });
+      }
+      scheduleSave();
+    });
+    dateInput.addEventListener("change", scheduleSave);
+    noteInput.addEventListener("change", scheduleSave);
+    noteInput.addEventListener("input", scheduleSave);
+
+    // Delete button (no confirm)
+    const deleteBtn = draftCard.querySelector("[data-delete-draft]");
+    if (deleteBtn) {
+      deleteBtn.addEventListener("click", function () {
+        fetch("/c/" + clubID + "/import/" + draftID + "/delete", {
+          method: "POST",
+          credentials: "same-origin",
+          redirect: "manual"
+        }).then(function () {
+          draftCard.remove();
+          refreshApproveBtn();
+          if (document.querySelectorAll(".draft-card").length === 0) {
+            window.location.reload();
+          }
+        });
+      });
+    }
+
+    updateIssuesUI();
+    return { setDate: function (v) { dateInput.value = v; scheduleSave(); } };
+  }
+
+  const drafts = Array.from(document.querySelectorAll(".draft-card")).map(initDraft);
+
+  function refreshApproveBtn() {
+    const approveBtn = document.getElementById("approve-btn");
+    if (!approveBtn) return;
+    const anyInvalid = document.querySelector(".draft-card--invalid") !== null;
+    const remaining = document.querySelectorAll(".draft-card").length;
+    approveBtn.disabled = anyInvalid || remaining === 0;
+    approveBtn.title = anyInvalid ? "Ret de markerede drafts først." : "";
+    approveBtn.textContent = "Godkend alle (" + remaining + ")";
+  }
+  refreshApproveBtn();
+
+  // Bulk-date apply
+  const bulkDate = document.getElementById("bulk-date");
+  const bulkApply = document.getElementById("bulk-date-apply");
+  if (bulkApply && bulkDate) {
+    bulkApply.addEventListener("click", function () {
+      const v = bulkDate.value;
+      if (!v) return;
+      drafts.forEach(function (d) { d.setDate(v); });
+    });
+  }
+
+  // More-import auto-submit
+  const moreInput = document.getElementById("more-import-input");
+  const moreForm = document.getElementById("more-import-form");
+  if (moreInput && moreForm) {
+    moreInput.addEventListener("change", function () {
+      if (moreInput.files && moreInput.files.length > 0) moreForm.submit();
+    });
+  }
+})();
+{{end}}

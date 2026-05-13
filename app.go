@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/martinohansen/whist/internal/db"
 	"github.com/martinohansen/whist/internal/game"
+	"github.com/martinohansen/whist/internal/mistral"
 )
 
 const dateLayout = "2006-01-02"
@@ -53,14 +55,32 @@ type Store interface {
 	ListGames(clubID string) ([]db.Game, error)
 	GetGame(clubID string, id int) (db.Game, error)
 	DeleteGame(clubID string, id int) error
+
+	// Drafts (paper-import flow)
+	AddDrafts(clubID, batchID string, drafts []db.Draft) error
+	ListPendingDrafts(clubID string) ([]db.Draft, error)
+	GetDraft(clubID string, id int) (db.Draft, error)
+	UpdateDraft(clubID string, id int, playedAt time.Time, meldingID int, note string, scores []db.DraftScore) error
+	DeleteDraft(clubID string, id int) error
+	ApproveDrafts(clubID string) (int, []int, error)
+	RejectPendingDrafts(clubID string) error
+}
+
+// ImportClient is the Mistral surface used by the import handlers. Concrete
+// type is *mistral.Client; tests can stub it.
+type ImportClient interface {
+	Enabled() bool
+	OCR(ctx context.Context, img []byte, mime string) (string, error)
+	Extract(ctx context.Context, markdown string, meldings []db.Melding, players []db.Player) ([]mistral.DraftGame, error)
 }
 
 type App struct {
-	store Store
+	store  Store
+	mistral ImportClient
 }
 
-func newApp(store Store) *App {
-	return &App{store: store}
+func newApp(store Store, ic ImportClient) *App {
+	return &App{store: store, mistral: ic}
 }
 
 func (a *App) routes() http.Handler {
@@ -159,6 +179,35 @@ func (a *App) handleClubRoute(w http.ResponseWriter, r *http.Request) {
 		a.handleDeletePlayer(w, r, club, pid)
 	case sub == "games/save":
 		a.handleSaveGame(w, r, club)
+	case sub == "import/analyze":
+		a.handleAnalyzeImport(w, r, club)
+	case sub == "import/review":
+		a.handleReviewImport(w, r, club)
+	case sub == "import/approve":
+		a.handleApproveDrafts(w, r, club)
+	case sub == "import/reject":
+		a.handleRejectDrafts(w, r, club)
+	case strings.HasPrefix(sub, "import/"):
+		rest := strings.TrimPrefix(sub, "import/")
+		if idStr, ok := strings.CutSuffix(rest, "/delete"); ok {
+			did, err := strconv.Atoi(idStr)
+			if err != nil {
+				http.NotFound(w, r)
+				return
+			}
+			a.handleDeleteDraft(w, r, club, did)
+			return
+		}
+		if idStr, ok := strings.CutSuffix(rest, "/save"); ok {
+			did, err := strconv.Atoi(idStr)
+			if err != nil {
+				http.NotFound(w, r)
+				return
+			}
+			a.handleSaveDraft(w, r, club, did)
+			return
+		}
+		http.NotFound(w, r)
 	case sub == "settings":
 		a.handleSettings(w, r, club)
 	case sub == "settings/save":

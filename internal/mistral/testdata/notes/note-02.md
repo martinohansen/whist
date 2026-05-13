@@ -1,0 +1,6 @@
+- Martin & Hanne melder 8, får 9
+- Mikkel & Katrine melder 10, får 8
+- Martin solo, får 1
+- Hanne & Mikkel melder 11, får 11
+- Katrine & Martin melder 13, får 13
+- Katrine solo med Martin (Katrine 1, Martin 3)

@@ -168,6 +168,30 @@ CREATE TABLE IF NOT EXISTS seasons (
 );
 
 CREATE INDEX IF NOT EXISTS seasons_club_idx ON seasons(club_id, start_date DESC);
+
+CREATE TABLE IF NOT EXISTS game_drafts (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	club_id TEXT NOT NULL REFERENCES clubs(id) ON DELETE CASCADE,
+	batch_id TEXT NOT NULL,
+	played_at DATETIME,
+	melding_id INTEGER REFERENCES meldings(id) ON DELETE SET NULL,
+	melding_name TEXT NOT NULL DEFAULT '',
+	note TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL DEFAULT 'pending',
+	created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS game_drafts_club_idx ON game_drafts(club_id, status, created_at);
+
+CREATE TABLE IF NOT EXISTS game_draft_scores (
+	draft_id INTEGER NOT NULL REFERENCES game_drafts(id) ON DELETE CASCADE,
+	position INTEGER NOT NULL,
+	player_id INTEGER REFERENCES players(id) ON DELETE SET NULL,
+	raw_name TEXT NOT NULL DEFAULT '',
+	role TEXT NOT NULL DEFAULT 'modspil',
+	tricks INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (draft_id, position)
+);
 `
 	if _, err := db.Exec(schema); err != nil {
 		return err
@@ -540,8 +564,8 @@ var DefaultMeldings = []Melding{
 	{Position: 5, Name: "11", Bid: 11, Points: 6, Type: MeldingTypeNormal},
 	{Position: 6, Name: "12", Bid: 12, Points: 8, Type: MeldingTypeNormal},
 	{Position: 7, Name: "13", Bid: 13, Points: 16, Type: MeldingTypeNormal},
-	{Position: 8, Name: "Sol", Bid: 0, Points: 1, Type: MeldingTypeNolo},
-	{Position: 9, Name: "Ren sol", Bid: 0, Points: 3, Type: MeldingTypeNolo},
+	{Position: 8, Name: "Sol", Bid: 2, Points: 1, Type: MeldingTypeNolo},
+	{Position: 9, Name: "Ren sol", Bid: 1, Points: 3, Type: MeldingTypeNolo},
 }
 
 func seedDefaultMeldingsTx(tx *sql.Tx, clubID string) error {

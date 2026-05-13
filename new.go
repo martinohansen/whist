@@ -25,7 +25,7 @@ func (a *App) handleNewGame(w http.ResponseWriter, r *http.Request, club db.Club
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	a.renderNewGame(w, r, club, "")
+	a.renderNewGame(w, r, club, r.URL.Query().Get("import_error"))
 }
 
 func (a *App) renderNewGame(w http.ResponseWriter, r *http.Request, club db.Club, errMsg string) {

@@ -3,8 +3,8 @@
 <table class="table">
   <thead>
     <tr>
-      <th>Dato</th>
-      <th>Melding</th>
+      <th class="col-date">Dato</th>
+      <th class="col-melding">Melding</th>
       <th>Melder</th>
       <th>Modstandere</th>
     </tr>
@@ -12,15 +12,15 @@
   <tbody>
     {{range .Games}}
     <tr>
-      <td>
+      <td class="col-date">
         <a href="/c/{{.ClubID}}/games/{{.ID}}">{{.PlayedAt.Format "2006-01-02"}}</a>
       </td>
-      <td>{{.MeldingName}} ({{gameTricks .}}){{if .Note}} <span class="note-indicator" title="{{.Note}}">📝</span>{{end}}</td>
+      <td class="col-melding">{{.MeldingName}} ({{gameTricks .}}){{if .Note}} <span class="note-indicator" title="{{.Note}}">📝</span>{{end}}</td>
       <td class="participants">
-        {{range .Scores}}{{if or (eq .Role "melder") (eq .Role "makker")}}<span title="{{.Player.Name}}">{{.Player.Emoji}}</span>{{end}}{{end}}
+        {{range .Scores}}{{if or (eq .Role "melder") (eq .Role "makker")}}<span>{{.Player.Emoji}} {{.Player.Name}}</span>{{end}}{{end}}
       </td>
       <td class="participants">
-        {{range .Scores}}{{if eq .Role "modspil"}}<span title="{{.Player.Name}}">{{.Player.Emoji}}</span>{{end}}{{end}}
+        {{range .Scores}}{{if eq .Role "modspil"}}<span>{{.Player.Emoji}} {{.Player.Name}}</span>{{end}}{{end}}
       </td>
     </tr>
     {{end}}

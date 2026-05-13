@@ -48,11 +48,15 @@ h1 {
   margin-bottom: var(--spacing-md);
 }
 
-h2.stat-label {
+.stat-label {
   font-size: 12px;
   color: var(--muted);
   font-weight: 600;
   text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+h2.stat-label {
   margin-top: var(--spacing-xl);
   margin-bottom: var(--spacing-md);
 }
@@ -238,20 +242,38 @@ a:hover {
   white-space: nowrap;
 }
 
+.table .col-date {
+  width: 1%;
+  white-space: nowrap;
+}
+
+.table .col-melding {
+  width: 1%;
+  white-space: nowrap;
+}
+
+.table td.participants {
+  max-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .table .participants span {
-  margin-right: 2px;
-  font-size: 1.05em;
+  display: inline-block;
+  white-space: nowrap;
+  margin-right: var(--spacing-sm);
+  font-size: 1em;
+}
+
+.table .participants span:last-child {
+  margin-right: 0;
 }
 
 .note-indicator {
   font-size: 0.9em;
   opacity: 0.7;
   cursor: help;
-}
-
-#leaderboard td:nth-child(4) {
-  font-weight: 600;
-  color: var(--accent);
 }
 
 /* FORMS & INPUTS */
@@ -758,6 +780,188 @@ button.emoji-picker:hover {
     grid-template-columns: 1fr 1fr auto;
   }
   .season-row input[name^="name_"] {
+    grid-column: 1 / -1;
+  }
+}
+
+/* IMPORT FLOW (foto → drafts) */
+.loading-dots::after {
+  display: inline-block;
+  content: "";
+  width: 1.5em;
+  text-align: left;
+  animation: loading-dots 1.4s steps(4, jump-none) infinite;
+}
+
+@keyframes loading-dots {
+  0%   { content: ""; }
+  25%  { content: "."; }
+  50%  { content: ".."; }
+  75%  { content: "..."; }
+  100% { content: ""; }
+}
+
+
+.import-banner {
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.import-banner-link {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: 10px var(--spacing-md);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.import-banner-link:hover {
+  background: var(--accent-soft);
+}
+
+.import-banner-icon {
+  font-size: 20px;
+}
+
+.import-dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--spacing-xs);
+  padding: var(--spacing-xl);
+  border: 2px dashed var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  cursor: pointer;
+  text-align: center;
+}
+
+.import-dropzone:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.import-dropzone-icon {
+  font-size: 36px;
+}
+
+.import-dropzone-text {
+  font-weight: 600;
+}
+
+.import-previews {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm);
+}
+
+.import-thumb {
+  max-width: 120px;
+  max-height: 120px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  object-fit: cover;
+}
+
+.bulk-date-row {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-md);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.draft-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  padding: var(--spacing-md);
+}
+
+.draft-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--spacing-sm);
+  margin-bottom: var(--spacing-sm);
+}
+
+.draft-card-head .autosave-indicator {
+  margin-right: auto;
+}
+
+.autosave-indicator {
+  font-size: 12px;
+}
+
+.draft-card--invalid {
+  border-color: var(--error);
+  background: #fff5f5;
+}
+
+
+.draft-card-players {
+  list-style: none;
+  margin: 0 0 var(--spacing-sm);
+  padding: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px var(--spacing-md);
+}
+
+.draft-card-players li {
+  font-size: 14px;
+}
+
+.draft-issues {
+  margin: var(--spacing-xs) 0;
+  padding-left: var(--spacing-md);
+  color: var(--error);
+  font-size: 13px;
+}
+
+.draft-card-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+.draft-players {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+.draft-player-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 80px;
+  gap: var(--spacing-sm);
+  align-items: center;
+}
+
+.draft-player-row select,
+.draft-player-row input[type="number"] {
+  width: 100%;
+  min-width: 0;
+}
+
+button.ghost.danger-text {
+  color: var(--error);
+}
+
+@media (max-width: 720px) {
+  .draft-card-players {
+    grid-template-columns: 1fr;
+  }
+  .draft-player-row {
+    grid-template-columns: 1fr 1fr;
+  }
+  .draft-player-row input[type="number"] {
     grid-column: 1 / -1;
   }
 }

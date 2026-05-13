@@ -19,7 +19,7 @@ func newTestApp(t *testing.T) (*App, *db.Store) {
 		t.Fatalf("open db: %v", err)
 	}
 	t.Cleanup(func() { store.Close() })
-	return newApp(store), store
+	return newApp(store, nil), store
 }
 
 func get(t *testing.T, h http.Handler, path string) *httptest.ResponseRecorder {
