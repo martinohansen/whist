@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/martinohansen/whist/internal/db"
 )
@@ -218,6 +219,131 @@ func TestPasswordSearchOnlyMatchesProtected(t *testing.T) {
 		t.Errorf("open club leaked into search results")
 	}
 	_ = idOpen
+}
+
+func TestHomeSearchFindsPublicClubs(t *testing.T) {
+	app, store := newTestApp(t)
+	h := app.routes()
+
+	idOpen := createClub(t, h, "Aabne Klub")
+	idLocked := createClub(t, h, "Laaste Klub")
+	if err := store.SetClubPassword(idLocked, "hemmelig"); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := get(t, h, "/?q=klub")
+	assertStatus(t, rec, http.StatusOK)
+	body := rec.Body.String()
+	if !strings.Contains(body, "Laaste Klub") {
+		t.Errorf("public club missing from home search")
+	}
+	if strings.Contains(body, "Aabne Klub") {
+		t.Errorf("private club leaked into home search")
+	}
+	_ = idOpen
+}
+
+func TestSaveGameAndAddAnotherRedirectsToNewGame(t *testing.T) {
+	app, store := newTestApp(t)
+	h := app.routes()
+
+	id := createClub(t, h, "Testklub")
+	for _, name := range []string{"Anna", "Bo", "Carl", "Dorthe"} {
+		rec := post(t, h, "/c/"+id+"/players/add", url.Values{"name": {name}})
+		assertStatus(t, rec, http.StatusSeeOther)
+	}
+	players, err := store.ListPlayers(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meldings, err := store.ListMeldings(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	form := url.Values{
+		"played_at":  {"2026-05-11"},
+		"melding_id": {itoa(meldings[0].ID)},
+		"after":      {"new"},
+	}
+	for i, p := range players {
+		pid := itoa(p.ID)
+		form.Add("player_id", pid)
+		switch i {
+		case 0:
+			form.Set("role_"+pid, "melder")
+			form.Set("tricks_"+pid, "4")
+		case 1:
+			form.Set("role_"+pid, "makker")
+			form.Set("tricks_"+pid, "3")
+		case 2:
+			form.Set("role_"+pid, "modspil")
+			form.Set("tricks_"+pid, "3")
+		case 3:
+			form.Set("role_"+pid, "modspil")
+			form.Set("tricks_"+pid, "3")
+		}
+	}
+
+	rec := post(t, h, "/c/"+id+"/games/save", form)
+	assertStatus(t, rec, http.StatusSeeOther)
+	if got, want := rec.Header().Get("Location"), "/c/"+id+"/new"; got != want {
+		t.Fatalf("redirect=%q want %q", got, want)
+	}
+}
+
+func TestMeldingSettingsPreserveSubmittedOrder(t *testing.T) {
+	app, store := newTestApp(t)
+	h := app.routes()
+
+	id := createClub(t, h, "Testklub")
+	rec := post(t, h, "/c/"+id+"/settings/save", url.Values{
+		"name":           {"Testklub"},
+		"rules":          {""},
+		"visibility":     {"private"},
+		"melding_name":   {"Ren sol", "7"},
+		"melding_type":   {"nolo", "normal"},
+		"melding_bid":    {"1", "7"},
+		"melding_points": {"3", "1"},
+		"player_id":      {},
+		"player_name":    {},
+		"player_emoji":   {},
+		"season_id":      {},
+		"season_name":    {},
+		"season_start":   {},
+		"season_end":     {},
+	})
+	assertStatus(t, rec, http.StatusOK)
+
+	meldings, err := store.ListMeldings(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(meldings) != 2 {
+		t.Fatalf("meldings len=%d want 2", len(meldings))
+	}
+	if meldings[0].Name != "Ren sol" || meldings[1].Name != "7" {
+		t.Fatalf("order=%q, %q; want Ren sol, 7", meldings[0].Name, meldings[1].Name)
+	}
+}
+
+func TestClubRouteRateLimit(t *testing.T) {
+	app, _ := newTestApp(t)
+	app.clubLimiter = newRateLimiter(2, time.Minute)
+	h := app.routes()
+
+	for i := 0; i < 2; i++ {
+		rec := get(t, h, "/c/00000000000000000000000000")
+		assertStatus(t, rec, http.StatusNotFound)
+	}
+	rec := get(t, h, "/c/00000000000000000000000000")
+	assertStatus(t, rec, http.StatusTooManyRequests)
+	if got, want := rec.Body.String(), "429 Too Many Requests\n"; got != want {
+		t.Fatalf("rate limit body=%q want %q", got, want)
+	}
+	if got := rec.Header().Get("Retry-After"); got != "" {
+		t.Fatalf("Retry-After=%q want empty", got)
+	}
 }
 
 func itoa(i int) string {

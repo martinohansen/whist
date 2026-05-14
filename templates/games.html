@@ -1,32 +1,34 @@
 {{define "content"}}
-{{if .Games}}
-<table class="table">
-  <thead>
-    <tr>
-      <th class="col-date">Dato</th>
-      <th class="col-melding">Melding</th>
-      <th>Melder</th>
-      <th>Modstandere</th>
-    </tr>
-  </thead>
-  <tbody>
-    {{range .Games}}
-    <tr>
-      <td class="col-date">
-        <a href="/c/{{.ClubID}}/games/{{.ID}}">{{.PlayedAt.Format "2006-01-02"}}</a>
-      </td>
-      <td class="col-melding">{{.MeldingName}} ({{gameTricks .}}){{if .Note}} <span class="note-indicator" title="{{.Note}}">📝</span>{{end}}</td>
-      <td class="participants">
-        {{range .Scores}}{{if or (eq .Role "melder") (eq .Role "makker")}}<span>{{.Player.Emoji}} {{.Player.Name}}</span>{{end}}{{end}}
-      </td>
-      <td class="participants">
-        {{range .Scores}}{{if eq .Role "modspil"}}<span>{{.Player.Emoji}} {{.Player.Name}}</span>{{end}}{{end}}
-      </td>
-    </tr>
-    {{end}}
-  </tbody>
-</table>
-{{else}}
-<p><em>Ingen spil endnu.</em> <a href="/c/{{.Club.ID}}/new">Tilføj det første</a>.</p>
-{{end}}
+<div class="stack">
+  <table class="table games-table">
+    <thead>
+      <tr>
+        <th class="rank hide-small">#</th>
+        <th>Dato</th>
+        <th class="nowrap">Melding</th>
+        <th class="nowrap">Meldeside</th>
+        <th class="hide-small">Modstandere</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{if .Games}}{{range .Games}}
+      <tr>
+        <td class="rank hide-small">{{.ID}}</td>
+        <td><a href="/c/{{.ClubID}}/games/{{.ID}}">{{.PlayedAt.Format "2006-01-02"}}</a></td>
+        <td class="nowrap">{{.MeldingName}} ({{gameTricks .}}){{if .Note}} <span class="note-indicator" title="{{.Note}}">📝</span>{{end}}</td>
+        <td class="nowrap participants">
+          {{range .Scores}}{{if or (eq .Role "melder") (eq .Role "makker")}}<span>{{.Player.Emoji}} {{.Player.Name}}</span>{{end}}{{end}}
+        </td>
+        <td class="hide-small participants emoji-strip">
+          {{range .Scores}}{{if eq .Role "modspil"}}<span title="{{.Player.Name}}">{{.Player.Emoji}}</span>{{end}}{{end}}
+        </td>
+      </tr>
+      {{end}}{{else}}
+      <tr>
+        <td colspan="5">Ingen spil registreret endnu.</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
 {{end}}

@@ -35,8 +35,17 @@
     </p>
 
     <table class="table meldings-table">
+      <colgroup>
+        <col class="col-drag" />
+        <col class="col-name" />
+        <col class="col-type" />
+        <col class="col-num" />
+        <col class="col-num" />
+        <col class="col-remove" />
+      </colgroup>
       <thead>
         <tr>
+          <th class="row-drag-col"><span class="sr-only">Rækkefølge</span></th>
           <th>Navn</th>
           <th>Type</th>
           <th class="num">Stik</th>
@@ -47,6 +56,7 @@
       <tbody id="meldings-body">
         {{range .Meldings}}
         <tr>
+          <td class="row-drag-col"><button type="button" class="ghost drag-handle" draggable="true" aria-label="Træk melding">↕</button></td>
           <td><input type="text" name="melding_name" value="{{.Name}}" required /></td>
           <td>
             <select name="melding_type">
@@ -63,27 +73,6 @@
     </table>
     <div class="actions">
       <button type="button" class="ghost" id="melding-add">+ Tilføj melding</button>
-    </div>
-
-    <h2 class="stat-label">Synlighed</h2>
-    <p class="muted">
-      Offentlige klubber kræver et kodeord og kan findes via søgning.
-      Private klubber kan ikke findes via søgning, men kan stadig deles
-      via direkte link til klubben.
-    </p>
-    <div class="visibility-row">
-      <div class="visibility-toggle" role="group" aria-label="Synlighed">
-        <input type="radio" name="visibility" id="vis-public" value="public"
-               {{if .PasswordEnabled}}checked{{end}} />
-        <label for="vis-public">Offentlig</label>
-        <input type="radio" name="visibility" id="vis-private" value="private"
-               {{if not .PasswordEnabled}}checked{{end}} />
-        <label for="vis-private">Privat</label>
-      </div>
-      <input type="password" name="password" id="password-input"
-             class="password-input"
-             placeholder="Kodeord"
-             {{if not .PasswordEnabled}}hidden{{end}} />
     </div>
 
     <h2 class="stat-label">Spillere</h2>
@@ -109,9 +98,9 @@
       <button type="button" class="ghost" id="player-add">+ Tilføj spiller</button>
     </div>
 
-    <h2 class="stat-label">Sæsoner</h2>
+    <h2 class="stat-label">Perioder</h2>
     <p class="muted">
-      Sæsoner afgrænser hvilke spil der tæller med i stillingen.
+      Perioder afgrænser hvilke spil der tæller med i stillingen.
       Datointervaller må ikke overlappe.
     </p>
     <div class="season-list" id="seasons-list">
@@ -127,12 +116,33 @@
         <button type="submit" class="ghost row-remove"
                 formaction="/c/{{$.Club.ID}}/seasons/{{.ID}}/delete"
                 formnovalidate
-                onclick="return confirm('Slet sæsonen {{.Name}}?');">−</button>
+                onclick="return confirm('Slet perioden {{.Name}}?');">−</button>
       </div>
       {{end}}
     </div>
     <div class="actions">
-      <button type="button" class="ghost" id="season-add">+ Tilføj sæson</button>
+      <button type="button" class="ghost" id="season-add">+ Tilføj periode</button>
+    </div>
+
+    <h2 class="stat-label">Synlighed</h2>
+    <p class="muted">
+      Offentlige klubber kræver et kodeord og kan findes via søgning.
+      Private klubber kan ikke findes via søgning, men kan stadig deles
+      via direkte link til klubben.
+    </p>
+    <div class="visibility-row">
+      <div class="visibility-toggle" role="group" aria-label="Synlighed">
+        <input type="radio" name="visibility" id="vis-public" value="public"
+               {{if .PasswordEnabled}}checked{{end}} />
+        <label for="vis-public">Offentlig</label>
+        <input type="radio" name="visibility" id="vis-private" value="private"
+               {{if not .PasswordEnabled}}checked{{end}} />
+        <label for="vis-private">Privat</label>
+      </div>
+      <input type="password" name="password" id="password-input"
+             class="password-input"
+             placeholder="Kodeord"
+             {{if not .PasswordEnabled}}hidden{{end}} />
     </div>
 
     <div class="actions">
@@ -147,6 +157,7 @@
   document.getElementById("melding-add").addEventListener("click", function () {
     var tr = document.createElement("tr");
     tr.innerHTML =
+      '<td class="row-drag-col"><button type="button" class="ghost drag-handle" draggable="true" aria-label="Træk melding">↕</button></td>' +
       '<td><input type="text" name="melding_name" required /></td>' +
       '<td><select name="melding_type"><option value="normal" selected>Normal</option><option value="nolo">Nolo</option></select></td>' +
       '<td class="num"><input type="number" name="melding_bid" min="0" max="13" value="7" required /></td>' +
@@ -158,6 +169,31 @@
     var btn = e.target.closest(".row-remove");
     if (!btn) return;
     btn.closest("tr").remove();
+  });
+  var draggedMeldingRow = null;
+  body.addEventListener("dragstart", function (e) {
+    var handle = e.target.closest(".drag-handle");
+    if (!handle) {
+      e.preventDefault();
+      return;
+    }
+    draggedMeldingRow = handle.closest("tr");
+    draggedMeldingRow.classList.add("dragging");
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", "");
+  });
+  body.addEventListener("dragend", function () {
+    if (draggedMeldingRow) draggedMeldingRow.classList.remove("dragging");
+    draggedMeldingRow = null;
+  });
+  body.addEventListener("dragover", function (e) {
+    if (!draggedMeldingRow) return;
+    var row = e.target.closest("tr");
+    if (!row || row === draggedMeldingRow) return;
+    e.preventDefault();
+    var box = row.getBoundingClientRect();
+    var after = e.clientY > box.top + box.height / 2;
+    body.insertBefore(draggedMeldingRow, after ? row.nextSibling : row);
   });
 
   // Emoji picker: cycle through the supported pool. The picker button cycles
@@ -208,7 +244,7 @@
     btn.closest(".player-edit-row").remove();
   });
 
-  // Add season: append a new row with empty fields.
+  // Add period: append a new row with empty fields.
   var seasonsList = document.getElementById("seasons-list");
   document.getElementById("season-add").addEventListener("click", function () {
     var row = document.createElement("div");

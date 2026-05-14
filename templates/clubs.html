@@ -4,7 +4,7 @@
 
   {{if .Recents}}
   <h2 class="stat-label">Seneste klubber</h2>
-  <div class="list">
+  <div class="list club-grid">
     {{range .Recents}}
     <a class="list-item" href="/c/{{.ID}}">
       <span class="club-emoji">{{if .Emoji}}{{.Emoji}}{{else}}🃏{{end}}</span>
@@ -16,8 +16,8 @@
 
   <h2 class="stat-label">Søg efter klub</h2>
   <p class="muted">
-    Kun klubber med kodeord kan findes via søgning. Klubber uden kodeord
-    kan kun tilgås via direkte link.
+    Offentlige klubber kan findes via søgning. Private klubber kan kun
+    tilgås via direkte link.
   </p>
   <form action="/clubs" method="get" class="inline-form">
     <input type="text" name="q" placeholder="Navn på klub" value="{{.Query}}" autofocus />
@@ -25,7 +25,7 @@
   </form>
   {{if .Searched}}
     {{if .Matches}}
-    <div class="list">
+    <div class="list club-search-results">
       {{range .Matches}}
       <a class="list-item" href="/c/{{.ID}}">
         <span>{{if .Emoji}}{{.Emoji}}{{else}}🃏{{end}}</span>

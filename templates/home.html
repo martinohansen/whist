@@ -4,7 +4,7 @@
 
   <h2 class="stat-label">Seneste klubber</h2>
   {{if .Recents}}
-  <div class="list">
+  <div class="list club-grid">
     {{range .Recents}}
     <a class="list-item" href="/c/{{.ID}}">
       <span class="club-emoji">{{if .Emoji}}{{.Emoji}}{{else}}🃏{{end}}</span>
@@ -16,8 +16,32 @@
   <p class="muted">Ingen besøgte klubber endnu.</p>
   {{end}}
 
+  <h2 class="stat-label">Søg efter klub</h2>
+  <p class="muted">
+    Offentlige klubber kan findes via søgning. Private klubber kan kun
+    tilgås via direkte link.
+  </p>
+  <form action="/" method="get" class="inline-form home-action-form">
+    <input type="text" name="q" placeholder="Navn på klub" value="{{.Query}}" />
+    <button type="submit">Søg</button>
+  </form>
+  {{if .Searched}}
+    {{if .Matches}}
+    <div class="list club-search-results">
+      {{range .Matches}}
+      <a class="list-item" href="/c/{{.ID}}">
+        <span class="club-emoji">{{if .Emoji}}{{.Emoji}}{{else}}🃏{{end}}</span>
+        <span class="club-name-plain">{{.Name}}</span>
+      </a>
+      {{end}}
+    </div>
+    {{else}}
+    <p class="muted"><em>Ingen klubber matchede {{.Query}}.</em></p>
+    {{end}}
+  {{end}}
+
   <h2 class="stat-label">Opret klub</h2>
-  <form action="/clubs/new" method="post" class="inline-form">
+  <form action="/clubs/new" method="post" class="inline-form home-action-form">
     <input type="text" name="name" placeholder="Klubbens navn" required />
     <button type="submit">Opret</button>
   </form>

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -75,12 +76,17 @@ type ImportClient interface {
 }
 
 type App struct {
-	store  Store
-	mistral ImportClient
+	store       Store
+	mistral     ImportClient
+	clubLimiter *rateLimiter
 }
 
 func newApp(store Store, ic ImportClient) *App {
-	return &App{store: store, mistral: ic}
+	return &App{
+		store:       store,
+		mistral:     ic,
+		clubLimiter: newRateLimiter(1000, 5*time.Minute),
+	}
 }
 
 func (a *App) routes() http.Handler {
@@ -113,6 +119,9 @@ func (a *App) handleClubRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	clubID := strings.ToLower(parts[0])
+	if !a.allowClubPath(w, r) {
+		return
+	}
 	if !db.ValidID(clubID) {
 		http.NotFound(w, r)
 		return
@@ -244,6 +253,25 @@ func (a *App) handleClubRoute(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (a *App) allowClubPath(w http.ResponseWriter, r *http.Request) bool {
+	if a.clubLimiter == nil {
+		return true
+	}
+	if a.clubLimiter.allow(clientIP(r), time.Now()) {
+		return true
+	}
+	http.Error(w, "429 Too Many Requests", http.StatusTooManyRequests)
+	return false
+}
+
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil && host != "" {
+		return host
+	}
+	return r.RemoteAddr
 }
 
 type layoutData struct {

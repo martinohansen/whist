@@ -9,8 +9,11 @@ import (
 
 type homeData struct {
 	layoutData
-	Error   string
-	Recents []RecentClub
+	Error    string
+	Query    string
+	Matches  []db.Club
+	Searched bool
+	Recents  []RecentClub
 }
 
 type clubsData struct {
@@ -27,8 +30,23 @@ func (a *App) handleHome(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	q := strings.TrimSpace(r.FormValue("q"))
+	var matches []db.Club
+	searched := false
+	if q != "" {
+		var err error
+		matches, err = a.store.SearchClubs(q)
+		if err != nil {
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+		searched = true
+	}
 	data := homeData{
 		layoutData: a.newLayout(r, "Whist", "/", nil),
+		Query:      q,
+		Matches:    matches,
+		Searched:   searched,
 		Recents:    readRecentClubs(r),
 	}
 	renderTemplate(w, "layout", data, "templates/layout.html", "templates/home.html")

@@ -125,12 +125,12 @@ func validateSeasonForm(name, start, end string) string {
 
 func seasonErrMessage(err error) string {
 	if errors.Is(err, db.ErrSeasonOverlap) {
-		return "Sæsonen overlapper en eksisterende sæson."
+		return "Perioden overlapper en eksisterende periode."
 	}
 	if errors.Is(err, db.ErrSeasonNotFound) {
-		return "Sæsonen findes ikke."
+		return "Perioden findes ikke."
 	}
-	return "Kunne ikke gemme sæson."
+	return "Kunne ikke gemme periode."
 }
 
 func (a *App) handleDeleteSeason(w http.ResponseWriter, r *http.Request, club db.Club, id int) {

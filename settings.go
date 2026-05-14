@@ -2,7 +2,6 @@ package main
 
 import (
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -41,7 +40,7 @@ func (a *App) renderSettings(w http.ResponseWriter, r *http.Request, club db.Clu
 		return
 	}
 	data := settingsData{
-		layoutData:      a.newLayout(r, club.Name+" — reglement", clubPath(&club, "settings"), &club),
+		layoutData:      a.newLayout(r, club.Name+" — Klubben", clubPath(&club, "settings"), &club),
 		Meldings:        meldings,
 		Seasons:         seasons,
 		Players:         players,
@@ -114,7 +113,6 @@ func (a *App) handleSaveSettings(w http.ResponseWriter, r *http.Request, club db
 		a.renderSettings(w, r, club, "Mindst én melding kræves.", "")
 		return
 	}
-	sort.SliceStable(ms, func(i, j int) bool { return ms[i].Points < ms[j].Points })
 	if err := a.store.ReplaceMeldings(club.ID, ms); err != nil {
 		a.renderSettings(w, r, club, "Kunne ikke gemme meldinger.", "")
 		return
@@ -171,7 +169,7 @@ func (a *App) handleSaveSettings(w http.ResponseWriter, r *http.Request, club db
 	sstarts := r.Form["season_start"]
 	sends := r.Form["season_end"]
 	if len(sids) != len(snames) || len(sids) != len(sstarts) || len(sids) != len(sends) {
-		a.renderSettings(w, r, club, "Sæsoner er ufuldstændige.", "")
+		a.renderSettings(w, r, club, "Perioder er ufuldstændige.", "")
 		return
 	}
 	for i := range sids {

@@ -52,7 +52,7 @@ func (a *App) handleDeletePlayer(w http.ResponseWriter, r *http.Request, club db
 
 // redirectAfterPlayerChange picks the most useful page to land on after
 // adding a player: stay on the page the request came from when it's the
-// new-game flow, else the reglement page.
+// new-game flow, else the club settings page.
 func redirectAfterPlayerChange(r *http.Request, club db.Club) string {
 	ref := r.Referer()
 	if strings.HasSuffix(ref, "/new") || strings.Contains(ref, "/new?") {

@@ -19,15 +19,15 @@
           <div class="nav-links">
             <a href="/c/{{.Club.ID}}" {{if eq .Path (printf "/c/%s" .Club.ID)}}class="active"{{end}}>Stilling</a>
             <a href="/c/{{.Club.ID}}/games" {{if eq .Path (printf "/c/%s/games" .Club.ID)}}class="active"{{end}}>Spil</a>
-            <a href="/c/{{.Club.ID}}/settings" {{if eq .Path (printf "/c/%s/settings" .Club.ID)}}class="active"{{end}}>Reglement</a>
+            <a href="/c/{{.Club.ID}}/settings" {{if eq .Path (printf "/c/%s/settings" .Club.ID)}}class="active"{{end}}>Klubben</a>
           </div>
           <div class="nav-right">
             {{if .Seasons}}
-            <form class="season-filter" aria-label="Sæson filter">
+            <form class="season-filter" aria-label="Periode filter">
               <label class="season-label">
-                <span class="sr-only">Sæson</span>
+                <span class="sr-only">Periode</span>
                 <select id="season-filter" name="season">
-                  <option value="0" {{if eq .SeasonID 0}}selected{{end}}>Alle sæsoner</option>
+                  <option value="0" {{if eq .SeasonID 0}}selected{{end}}>Alle perioder</option>
                   {{range .Seasons}}
                   <option value="{{.ID}}" {{if eq $.SeasonID .ID}}selected{{end}}>{{.Name}}</option>
                   {{end}}
@@ -45,7 +45,7 @@
       <footer class="footer">
         <span><a href="https://github.com/martinohansen/whist">GitHub</a></span>
         <span class="footer-sep">|</span>
-        <span><a href="https://buymeacoffee.com/martinlikesfilter">Buy me a coffee</a></span>
+        <span><a href="https://buymeacoffee.com/martinlikesfilter">☕️ Buy me a coffee</a></span>
         <span class="footer-version">{{version}}</span>
       </footer>
     </div>

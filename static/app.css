@@ -270,10 +270,19 @@ a:hover {
   margin-right: 0;
 }
 
+.table .emoji-strip span {
+  font-size: 1.15em;
+  padding: 2px;
+}
+
 .note-indicator {
   font-size: 0.9em;
   opacity: 0.7;
   cursor: help;
+}
+
+.nowrap {
+  white-space: nowrap;
 }
 
 /* FORMS & INPUTS */
@@ -304,6 +313,18 @@ input[type="number"] {
 .inline-form input[type="text"] {
   flex: 1;
   min-width: 120px;
+}
+
+.inline-form button {
+  height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.home-action-form button {
+  width: 88px;
+  flex-shrink: 0;
 }
 
 button {
@@ -346,6 +367,14 @@ button.danger {
   gap: var(--spacing-sm);
 }
 
+.club-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.club-search-results {
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
 .list-item {
   display: flex;
   gap: var(--spacing-sm);
@@ -355,6 +384,12 @@ button.danger {
   border-radius: var(--radius-md);
   background: var(--surface);
   cursor: pointer;
+}
+
+.club-name-plain {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .list-item input[type="checkbox"] {
@@ -579,8 +614,33 @@ button.emoji-picker:hover {
   resize: vertical;
 }
 
+.meldings-table {
+  table-layout: fixed;
+}
+
+.meldings-table col.col-drag {
+  width: 44px;
+}
+
+.meldings-table col.col-name {
+  width: auto;
+}
+
+.meldings-table col.col-type {
+  width: 124px;
+}
+
+.meldings-table col.col-num {
+  width: 78px;
+}
+
+.meldings-table col.col-remove {
+  width: 54px;
+}
+
 .meldings-table input[type="text"],
-.meldings-table input[type="number"] {
+.meldings-table input[type="number"],
+.meldings-table select {
   width: 100%;
   padding: 8px 10px;
   font-size: 15px;
@@ -594,6 +654,28 @@ button.emoji-picker:hover {
 
 .meldings-table .num input {
   text-align: right;
+}
+
+.meldings-table .row-drag-col {
+  text-align: center;
+  padding-left: var(--spacing-xs);
+  padding-right: var(--spacing-xs);
+}
+
+.drag-handle {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  cursor: grab;
+  line-height: 1;
+}
+
+.drag-handle:active {
+  cursor: grabbing;
+}
+
+.meldings-table tr.dragging {
+  opacity: 0.55;
 }
 
 /* Uniform 16px gaps between every column (8px padding on each side). */
@@ -716,7 +798,7 @@ button.emoji-picker:hover {
   color: var(--error);
 }
 
-/* PLAYERS (reglement page) */
+/* PLAYERS (club settings page) */
 .players-list {
   display: flex;
   flex-direction: column;
@@ -991,6 +1073,10 @@ button.ghost.danger-text {
 
 /* RESPONSIVE */
 @media (max-width: 720px) {
+  .hide-small {
+    display: none;
+  }
+
   .nav {
     flex-wrap: wrap;
   }
@@ -1017,6 +1103,10 @@ button.ghost.danger-text {
 
   .row-2,
   .player-list {
+    grid-template-columns: 1fr;
+  }
+
+  .club-grid {
     grid-template-columns: 1fr;
   }
 

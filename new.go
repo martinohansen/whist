@@ -141,5 +141,9 @@ func (a *App) handleSaveGame(w http.ResponseWriter, r *http.Request, club db.Clu
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
+	if r.FormValue("after") == "new" {
+		http.Redirect(w, r, clubPath(&club, "new"), http.StatusSeeOther)
+		return
+	}
 	http.Redirect(w, r, clubPath(&club, "games"), http.StatusSeeOther)
 }
