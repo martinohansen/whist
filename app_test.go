@@ -68,8 +68,55 @@ func TestHomeRenders(t *testing.T) {
 	h := app.routes()
 	rec := get(t, h, "/")
 	assertStatus(t, rec, http.StatusOK)
-	if !strings.Contains(rec.Body.String(), "Opret klub") {
+	body := rec.Body.String()
+	if !strings.Contains(body, "Opret klub") {
 		t.Errorf("home missing 'Opret klub'")
+	}
+	for _, want := range []string{
+		`<meta name="description"`,
+		`<link rel="canonical" href="https://example.com/"`,
+		`<meta name="robots" content="index,follow"`,
+		`"@type": "WebSite"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("home missing SEO marker %q", want)
+		}
+	}
+}
+
+func TestRobotsAndSitemap(t *testing.T) {
+	app, _ := newTestApp(t)
+	h := app.routes()
+
+	rec := get(t, h, "/robots.txt")
+	assertStatus(t, rec, http.StatusOK)
+	robots := rec.Body.String()
+	for _, want := range []string{
+		"Allow: /stats\n",
+		"Disallow: /c/\n",
+		"Disallow: /go\n",
+		"Sitemap: https://example.com/sitemap.xml\n",
+	} {
+		if !strings.Contains(robots, want) {
+			t.Errorf("robots.txt missing %q; body=%s", want, robots)
+		}
+	}
+
+	rec = get(t, h, "/sitemap.xml")
+	assertStatus(t, rec, http.StatusOK)
+	sitemap := rec.Body.String()
+	for _, want := range []string{
+		"<loc>https://example.com/</loc>",
+	} {
+		if !strings.Contains(sitemap, want) {
+			t.Errorf("sitemap missing %q; body=%s", want, sitemap)
+		}
+	}
+	if strings.Contains(robots, "Allow: /clubs\n") {
+		t.Errorf("robots.txt still exposes /clubs; body=%s", robots)
+	}
+	if strings.Contains(sitemap, "<loc>https://example.com/clubs</loc>") {
+		t.Errorf("sitemap still exposes /clubs; body=%s", sitemap)
 	}
 }
 
@@ -199,29 +246,15 @@ func TestRecentClubsCookie(t *testing.T) {
 	}
 }
 
-func TestPasswordSearchOnlyMatchesProtected(t *testing.T) {
-	app, store := newTestApp(t)
+func TestClubsPageRemoved(t *testing.T) {
+	app, _ := newTestApp(t)
 	h := app.routes()
 
-	idOpen := createClub(t, h, "Aabne Klub")
-	idLocked := createClub(t, h, "Laaste Klub")
-	if err := store.SetClubPassword(idLocked, "hemmelig"); err != nil {
-		t.Fatal(err)
-	}
-
 	rec := get(t, h, "/clubs?q=klub")
-	assertStatus(t, rec, http.StatusOK)
-	body := rec.Body.String()
-	if !strings.Contains(body, "Laaste Klub") {
-		t.Errorf("locked club missing from search results")
-	}
-	if strings.Contains(body, "Aabne Klub") {
-		t.Errorf("open club leaked into search results")
-	}
-	_ = idOpen
+	assertStatus(t, rec, http.StatusNotFound)
 }
 
-func TestHomeSearchFindsPublicClubs(t *testing.T) {
+func TestHomeSearchOnlyMatchesProtected(t *testing.T) {
 	app, store := newTestApp(t)
 	h := app.routes()
 
@@ -235,10 +268,10 @@ func TestHomeSearchFindsPublicClubs(t *testing.T) {
 	assertStatus(t, rec, http.StatusOK)
 	body := rec.Body.String()
 	if !strings.Contains(body, "Laaste Klub") {
-		t.Errorf("public club missing from home search")
+		t.Errorf("locked club missing from search results")
 	}
 	if strings.Contains(body, "Aabne Klub") {
-		t.Errorf("private club leaked into home search")
+		t.Errorf("open club leaked into search results")
 	}
 	_ = idOpen
 }

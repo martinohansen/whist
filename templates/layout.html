@@ -4,11 +4,32 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta property="og:title" content="🃏" />
+    <meta name="description" content="{{.Description}}" />
+    <meta name="robots" content="{{.Robots}}" />
+    <link rel="canonical" href="{{.CanonicalURL}}" />
+    <meta property="og:site_name" content="Whist" />
+    <meta property="og:title" content="{{.Title}}" />
+    <meta property="og:description" content="{{.Description}}" />
     <meta property="og:type" content="website" />
+    <meta property="og:url" content="{{.CanonicalURL}}" />
     <title>{{.Title}}</title>
     <link rel="stylesheet" href="/static/app.css" />
     <link rel="icon" href="/static/favicon.svg" />
+    {{if .IsHome}}
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebSite",
+        "name": "Whist",
+        "url": "{{.CanonicalURL}}",
+        "potentialAction": {
+          "@type": "SearchAction",
+          "target": "{{.CanonicalURL}}?q={search_term_string}",
+          "query-input": "required name=search_term_string"
+        }
+      }
+    </script>
+    {{end}}
   </head>
   <body>
     <div class="container">
@@ -37,8 +58,6 @@
             {{end}}
             <a href="/c/{{.Club.ID}}/new" class="{{if eq .Path (printf "/c/%s/new" .Club.ID)}}active{{end}}">Nyt spil</a>
           </div>
-        {{else}}
-          <a href="/clubs" {{if eq .Path "/clubs"}}class="active"{{end}}>Klubber</a>
         {{end}}
       </nav>
       <main class="card">{{template "content" .}}</main>

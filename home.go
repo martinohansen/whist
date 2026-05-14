@@ -16,15 +16,6 @@ type homeData struct {
 	Recents  []RecentClub
 }
 
-type clubsData struct {
-	layoutData
-	Error    string
-	Query    string
-	Matches  []db.Club
-	Searched bool
-	Recents  []RecentClub
-}
-
 func (a *App) handleHome(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
@@ -98,28 +89,4 @@ func (a *App) handleClubLookup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, "/c/"+code, http.StatusSeeOther)
-}
-
-// handleClubs renders the /clubs search page.
-func (a *App) handleClubs(w http.ResponseWriter, r *http.Request) {
-	q := strings.TrimSpace(r.FormValue("q"))
-	var matches []db.Club
-	searched := false
-	if q != "" {
-		var err error
-		matches, err = a.store.SearchClubs(q)
-		if err != nil {
-			http.Error(w, "db error", http.StatusInternalServerError)
-			return
-		}
-		searched = true
-	}
-	data := clubsData{
-		layoutData: a.newLayout(r, "Whist — klubber", "/clubs", nil),
-		Query:      q,
-		Matches:    matches,
-		Searched:   searched,
-		Recents:    readRecentClubs(r),
-	}
-	renderTemplate(w, "layout", data, "templates/layout.html", "templates/clubs.html")
 }

@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/xml"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
@@ -85,7 +88,7 @@ func newApp(store Store, ic ImportClient) *App {
 	return &App{
 		store:       store,
 		mistral:     ic,
-		clubLimiter: newRateLimiter(1000, 5*time.Minute),
+		clubLimiter: newRateLimiter(1000, 30*time.Minute),
 	}
 }
 
@@ -94,9 +97,9 @@ func (a *App) routes() http.Handler {
 	staticServer := http.FileServer(http.FS(staticContent))
 	mux.Handle("/static/", http.StripPrefix("/static/", staticServer))
 	mux.HandleFunc("/robots.txt", handleRobots)
+	mux.HandleFunc("/sitemap.xml", handleSitemap)
 
 	mux.HandleFunc("/", a.handleHome)
-	mux.HandleFunc("/clubs", a.handleClubs)
 	mux.HandleFunc("/clubs/new", a.handleCreateClub)
 	mux.HandleFunc("/go", a.handleClubLookup)
 
@@ -107,7 +110,33 @@ func (a *App) routes() http.Handler {
 
 func handleRobots(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Write([]byte("User-agent: *\nDisallow: /c/\n"))
+	fmt.Fprintf(w, "User-agent: *\nAllow: /\nAllow: /stats\nAllow: /static/\nDisallow: /c/\nDisallow: /go\nDisallow: /clubs/new\nSitemap: %s/sitemap.xml\n", siteOrigin(r))
+}
+
+type sitemapURLSet struct {
+	XMLName xml.Name     `xml:"urlset"`
+	XMLNS   string       `xml:"xmlns,attr"`
+	URLs    []sitemapURL `xml:"url"`
+}
+
+type sitemapURL struct {
+	Loc      string `xml:"loc"`
+	Priority string `xml:"priority"`
+}
+
+func handleSitemap(w http.ResponseWriter, r *http.Request) {
+	origin := siteOrigin(r)
+	out := sitemapURLSet{
+		XMLNS: "http://www.sitemaps.org/schemas/sitemap/0.9",
+		URLs: []sitemapURL{
+			{Loc: origin + "/", Priority: "1.0"},
+		},
+	}
+	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+	w.Write([]byte(xml.Header))
+	if err := xml.NewEncoder(w).Encode(out); err != nil {
+		slog.Error("render sitemap", "error", err)
+	}
 }
 
 // handleClubRoute dispatches /c/{id}/... and enforces password gating.
@@ -278,6 +307,10 @@ type layoutData struct {
 	Title          string
 	Path           string
 	Club           *db.Club
+	Description    string
+	CanonicalURL   string
+	Robots         string
+	IsHome         bool
 	Seasons        []db.Season
 	SeasonID       int
 	SeasonExplicit bool
@@ -285,9 +318,13 @@ type layoutData struct {
 
 func (a *App) newLayout(r *http.Request, title, path string, club *db.Club) layoutData {
 	data := layoutData{
-		Title: title,
-		Path:  path,
-		Club:  club,
+		Title:        title,
+		Path:         path,
+		Club:         club,
+		Description:  seoDescription(path, club),
+		CanonicalURL: canonicalURL(r, path),
+		Robots:       seoRobots(path),
+		IsHome:       path == "/",
 	}
 	if club != nil && r != nil {
 		if ctx, err := a.loadSeasonContext(r, *club); err == nil {
@@ -297,6 +334,48 @@ func (a *App) newLayout(r *http.Request, title, path string, club *db.Club) layo
 		}
 	}
 	return data
+}
+
+func seoDescription(path string, club *db.Club) string {
+	if club != nil {
+		return "Hold styr på whist-spil, meldinger, spillere, point og perioder for klubben."
+	}
+	return "Whist hjælper klubber med at registrere spil, beregne point og følge stillingen over tid."
+}
+
+func seoRobots(path string) string {
+	if strings.HasPrefix(path, "/c/") {
+		return "noindex,nofollow"
+	}
+	return "index,follow"
+}
+
+func canonicalURL(r *http.Request, path string) string {
+	if r == nil {
+		return path
+	}
+	if path == "" {
+		path = "/"
+	}
+	return siteOrigin(r) + path
+}
+
+func siteOrigin(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	proto := r.Header.Get("X-Forwarded-Proto")
+	if proto == "" {
+		proto = "https"
+		if r.TLS == nil && strings.HasPrefix(r.Host, "localhost") {
+			proto = "http"
+		}
+	}
+	host := r.Header.Get("X-Forwarded-Host")
+	if host == "" {
+		host = r.Host
+	}
+	return proto + "://" + host
 }
 
 func clubPath(c *db.Club, sub string) string {
