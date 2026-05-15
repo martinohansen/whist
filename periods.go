@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -81,6 +82,21 @@ func seasonParam(r *http.Request) (string, bool) {
 	return "", false
 }
 
+func selectedSeasonQuery(ctx seasonContext) string {
+	if !ctx.SeasonExplicit && ctx.SeasonID == 0 {
+		return ""
+	}
+	return "?season=" + strconv.Itoa(ctx.SeasonID)
+}
+
+func requestSeasonQuery(r *http.Request) string {
+	raw, explicit := seasonParam(r)
+	if !explicit {
+		return ""
+	}
+	return "?season=" + url.QueryEscape(strings.TrimSpace(raw))
+}
+
 // seasonFilter turns a season into a LeaderboardFilter (After/Until are
 // inclusive day bounds). Nil season → empty filter (all time).
 func seasonFilter(s *db.Season) db.LeaderboardFilter {
@@ -142,5 +158,5 @@ func (a *App) handleDeleteSeason(w http.ResponseWriter, r *http.Request, club db
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
-	http.Redirect(w, r, clubPath(&club, "settings"), http.StatusSeeOther)
+	http.Redirect(w, r, clubPathForRequest(r, &club, "settings"), http.StatusSeeOther)
 }

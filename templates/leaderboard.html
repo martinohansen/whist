@@ -1,16 +1,16 @@
 {{define "content"}}
 {{if .Rows}}
-<table class="table sortable" id="leaderboard">
+<table class="table" id="leaderboard">
   <thead>
     <tr>
       <th class="rank">#</th>
       <th class="name">Spiller</th>
-      <th class="num sortable-th"><abbr title="Spil">S</abbr></th>
-      <th class="num sortable-th"><abbr title="Vundet">V</abbr></th>
-      <th class="num sortable-th"><abbr title="Tabt">T</abbr></th>
-      <th class="num sortable-th"><abbr title="Vundne meldinger">M</abbr></th>
-      <th class="num sortable-th"><abbr title="Point">P</abbr></th>
-      <th class="num sortable-th"><abbr title="Points per spil">PPS</abbr></th>
+      <th class="num sortable-th {{if eq .SortKey "games"}}sort-{{.SortDir}}{{end}}"><a href="{{index .SortLinks "games"}}"><abbr title="Spil">S</abbr></a></th>
+      <th class="num sortable-th {{if eq .SortKey "wins"}}sort-{{.SortDir}}{{end}}"><a href="{{index .SortLinks "wins"}}"><abbr title="Vundet">V</abbr></a></th>
+      <th class="num sortable-th {{if eq .SortKey "losses"}}sort-{{.SortDir}}{{end}}"><a href="{{index .SortLinks "losses"}}"><abbr title="Tabt">T</abbr></a></th>
+      <th class="num sortable-th {{if eq .SortKey "meldings"}}sort-{{.SortDir}}{{end}}"><a href="{{index .SortLinks "meldings"}}"><abbr title="Vundne meldinger">M</abbr></a></th>
+      <th class="num sortable-th {{if eq .SortKey "points"}}sort-{{.SortDir}}{{end}}"><a href="{{index .SortLinks "points"}}"><abbr title="Point">P</abbr></a></th>
+      <th class="num sortable-th {{if eq .SortKey "pps"}}sort-{{.SortDir}}{{end}}"><a href="{{index .SortLinks "pps"}}"><abbr title="Points per spil">PPS</abbr></a></th>
     </tr>
   </thead>
   <tbody>
@@ -31,46 +31,6 @@
   </tbody>
 </table>
 {{else}}
-<p><em>Ingen spillere endnu.</em> <a href="/c/{{.Club.ID}}/new">Tilføj et spil</a> for at komme i gang.</p>
+<p><em>Ingen spillere endnu.</em> <a href="/c/{{.Club.ID}}/new{{.SeasonQuery}}">Tilføj et spil</a> for at komme i gang.</p>
 {{end}}
-<script>
-(function () {
-  var table = document.getElementById("leaderboard");
-  if (!table) return;
-  var ths = table.querySelectorAll("th.sortable-th");
-  var tbody = table.querySelector("tbody");
-  var state = { col: -1, dir: 1 };
-  function cellValue(tr, idx) {
-    var td = tr.children[idx];
-    if (!td) return "";
-    var t = td.textContent.trim().replace(",", ".");
-    var n = parseFloat(t);
-    return isNaN(n) ? t.toLowerCase() : n;
-  }
-  function sortBy(idx) {
-    if (state.col === idx) {
-      state.dir = -state.dir;
-    } else {
-      state.col = idx;
-      state.dir = -1;
-    }
-    var rows = Array.prototype.slice.call(tbody.children);
-    rows.sort(function (a, b) {
-      var av = cellValue(a, idx);
-      var bv = cellValue(b, idx);
-      if (av < bv) return -1 * state.dir;
-      if (av > bv) return 1 * state.dir;
-      return 0;
-    });
-    rows.forEach(function (r) { tbody.appendChild(r); });
-    ths.forEach(function (th) { th.classList.remove("sort-asc", "sort-desc"); });
-    var current = table.querySelectorAll("th")[idx];
-    if (current) current.classList.add(state.dir > 0 ? "sort-asc" : "sort-desc");
-  }
-  ths.forEach(function (th) {
-    var idx = Array.prototype.indexOf.call(th.parentNode.children, th);
-    th.addEventListener("click", function () { sortBy(idx); });
-  });
-})();
-</script>
 {{end}}

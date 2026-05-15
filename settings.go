@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -72,22 +73,23 @@ func (a *App) handleSaveSettings(w http.ResponseWriter, r *http.Request, club db
 	if emoji == "" || !db.IsEmojiInPool(emoji) {
 		emoji = db.Emoji(name)
 	}
-	rules := r.FormValue("rules")
-	if err := a.store.UpdateClub(club.ID, name, emoji, rules); err != nil {
-		a.renderSettings(w, r, club, "Kunne ikke gemme klub.", "")
-		return
+	update := db.SettingsUpdate{
+		Name:  name,
+		Emoji: emoji,
+		Rules: r.FormValue("rules"),
 	}
 
-	// Meldings: arrays melding_name[], melding_type[], melding_bid[], melding_points[]
+	// Meldings: parallel arrays. Existing rows keep their id so games can keep
+	// pointing at the same melding when settings are edited.
+	idsRaw := r.Form["melding_id"]
 	names := r.Form["melding_name"]
 	types := r.Form["melding_type"]
 	bids := r.Form["melding_bid"]
 	points := r.Form["melding_points"]
-	if len(names) != len(bids) || len(names) != len(points) || len(names) != len(types) {
+	if len(names) != len(idsRaw) || len(names) != len(bids) || len(names) != len(points) || len(names) != len(types) {
 		a.renderSettings(w, r, club, "Meldinger er ufuldstændige.", "")
 		return
 	}
-	var ms []db.Melding
 	for i, n := range names {
 		n = strings.TrimSpace(n)
 		if n == "" {
@@ -107,14 +109,18 @@ func (a *App) handleSaveSettings(w http.ResponseWriter, r *http.Request, club db
 		if t != db.MeldingTypeNolo {
 			t = db.MeldingTypeNormal
 		}
-		ms = append(ms, db.Melding{Name: n, Bid: b, Points: p, Type: t})
+		mid := 0
+		if raw := strings.TrimSpace(idsRaw[i]); raw != "" {
+			mid, err = strconv.Atoi(raw)
+			if err != nil {
+				a.renderSettings(w, r, club, "Meldinger er ufuldstændige.", "")
+				return
+			}
+		}
+		update.Meldings = append(update.Meldings, db.Melding{ID: mid, Name: n, Bid: b, Points: p, Type: t})
 	}
-	if len(ms) == 0 {
+	if len(update.Meldings) == 0 {
 		a.renderSettings(w, r, club, "Mindst én melding kræves.", "")
-		return
-	}
-	if err := a.store.ReplaceMeldings(club.ID, ms); err != nil {
-		a.renderSettings(w, r, club, "Kunne ikke gemme meldinger.", "")
 		return
 	}
 
@@ -138,15 +144,7 @@ func (a *App) handleSaveSettings(w http.ResponseWriter, r *http.Request, club db
 			if pn == "" {
 				continue
 			}
-			added, err := a.store.AddPlayer(club.ID, pn)
-			if err != nil {
-				a.renderSettings(w, r, club, "Kunne ikke tilføje spilleren.", "")
-				return
-			}
-			if err := a.store.UpdatePlayer(club.ID, added.ID, pn, pe); err != nil {
-				a.renderSettings(w, r, club, "Kunne ikke gemme spilleren.", "")
-				return
-			}
+			update.Players = append(update.Players, db.PlayerUpdate{Name: pn, Emoji: pe})
 			continue
 		}
 		if pn == "" {
@@ -157,10 +155,7 @@ func (a *App) handleSaveSettings(w http.ResponseWriter, r *http.Request, club db
 		if err != nil {
 			continue
 		}
-		if err := a.store.UpdatePlayer(club.ID, pid, pn, pe); err != nil {
-			a.renderSettings(w, r, club, "Kunne ikke gemme spilleren.", "")
-			return
-		}
+		update.Players = append(update.Players, db.PlayerUpdate{ID: pid, Name: pn, Emoji: pe})
 	}
 
 	// Seasons: parallel arrays season_id[], season_name[], season_start[], season_end[].
@@ -185,10 +180,7 @@ func (a *App) handleSaveSettings(w http.ResponseWriter, r *http.Request, club db
 				a.renderSettings(w, r, club, msg, "")
 				return
 			}
-			if err := a.store.AddSeason(club.ID, nm, st, ed); err != nil {
-				a.renderSettings(w, r, club, seasonErrMessage(err), "")
-				return
-			}
+			update.Seasons = append(update.Seasons, db.SeasonUpdate{Name: nm, StartDate: st, EndDate: ed})
 			continue
 		}
 		sid, err := strconv.Atoi(idRaw)
@@ -199,10 +191,7 @@ func (a *App) handleSaveSettings(w http.ResponseWriter, r *http.Request, club db
 			a.renderSettings(w, r, club, msg, "")
 			return
 		}
-		if err := a.store.UpdateSeason(club.ID, sid, nm, st, ed); err != nil {
-			a.renderSettings(w, r, club, seasonErrMessage(err), "")
-			return
-		}
+		update.Seasons = append(update.Seasons, db.SeasonUpdate{ID: sid, Name: nm, StartDate: st, EndDate: ed})
 	}
 
 	// Visibility/password handling.
@@ -211,23 +200,29 @@ func (a *App) handleSaveSettings(w http.ResponseWriter, r *http.Request, club db
 	switch visibility {
 	case "private":
 		if club.PasswordOn {
-			if err := a.store.SetClubPassword(club.ID, ""); err != nil {
-				a.renderSettings(w, r, club, "Kunne ikke fjerne kodeord.", "")
-				return
-			}
+			clear := ""
+			update.Password = &clear
 		}
 	case "public":
 		if pw != "" {
-			if err := a.store.SetClubPassword(club.ID, pw); err != nil {
-				a.renderSettings(w, r, club, "Kunne ikke gemme kodeord.", "")
-				return
-			}
-			hash, _ := a.store.ClubPasswordHash(club.ID)
-			setUnlockCookie(w, club.ID, hash)
+			update.Password = &pw
 		} else if !club.PasswordOn {
 			a.renderSettings(w, r, club, "Offentlige klubber kræver et kodeord.", "")
 			return
 		}
+	}
+
+	if err := a.store.UpdateSettings(club.ID, update); err != nil {
+		if errors.Is(err, db.ErrSeasonOverlap) || errors.Is(err, db.ErrSeasonNotFound) {
+			a.renderSettings(w, r, club, seasonErrMessage(err), "")
+			return
+		}
+		a.renderSettings(w, r, club, "Kunne ikke gemme klub.", "")
+		return
+	}
+	if update.Password != nil && *update.Password != "" {
+		hash, _ := a.store.ClubPasswordHash(club.ID)
+		setUnlockCookie(w, club.ID, hash)
 	}
 
 	updated, _ := a.store.GetClub(club.ID)

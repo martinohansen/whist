@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -13,11 +14,29 @@ import (
 
 type newGameData struct {
 	layoutData
-	Players  []db.Player
-	Meldings []db.Melding
-	PlayedAt string
+	Players           []gameFormPlayer
+	Meldings          []db.Melding
+	PlayedAt          string
+	Note              string
+	Error             string
+	Editing           bool
+	GameID            int
+	FormAction        string
+	SubmitLabel       string
+	SelectedMeldingID int
+}
+
+type gameFormPlayer struct {
+	db.Player
+	Role   string
+	Tricks int
+}
+
+type parsedGameForm struct {
+	Melding  db.Melding
+	Entries  []game.PlayerEntry
+	PlayedAt time.Time
 	Note     string
-	Error    string
 }
 
 func (a *App) handleNewGame(w http.ResponseWriter, r *http.Request, club db.Club) {
@@ -29,7 +48,7 @@ func (a *App) handleNewGame(w http.ResponseWriter, r *http.Request, club db.Club
 }
 
 func (a *App) renderNewGame(w http.ResponseWriter, r *http.Request, club db.Club, errMsg string) {
-	players, err := a.store.ListPlayers(club.ID)
+	players, err := a.loadGameFormPlayers(club.ID, nil)
 	if err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
@@ -40,13 +59,19 @@ func (a *App) renderNewGame(w http.ResponseWriter, r *http.Request, club db.Club
 		return
 	}
 	data := newGameData{
-		layoutData: a.newLayout(r, club.Name+" — Nyt spil", clubPath(&club, "new"), &club),
-		Players:    players,
-		Meldings:   meldings,
-		PlayedAt:   time.Now().Format(dateLayout),
-		Error:      errMsg,
+		layoutData:  a.newLayout(r, club.Name+" — Nyt spil", clubPath(&club, "new"), &club),
+		Players:     players,
+		Meldings:    meldings,
+		PlayedAt:    time.Now().Format(dateLayout),
+		Error:       errMsg,
+		FormAction:  clubPath(&club, "games/save"),
+		SubmitLabel: "Gem spil",
 	}
-	renderTemplate(w, "layout", data, "templates/layout.html", "templates/new.html")
+	renderTemplate(w, "layout", data,
+		"templates/layout.html",
+		"templates/game_entry_shared.html",
+		"templates/new.html",
+	)
 }
 
 func (a *App) handleSaveGame(w http.ResponseWriter, r *http.Request, club db.Club) {
@@ -59,52 +84,67 @@ func (a *App) handleSaveGame(w http.ResponseWriter, r *http.Request, club db.Clu
 		return
 	}
 
-	meldingID, err := strconv.Atoi(strings.TrimSpace(r.FormValue("melding_id")))
-	if err != nil {
-		a.renderNewGame(w, r, club, "Vælg en melding.")
-		return
-	}
-	melding, err := a.store.GetMelding(club.ID, meldingID)
-	if err != nil {
-		a.renderNewGame(w, r, club, "Ukendt melding.")
-		return
-	}
-
-	ids, err := parseIDs(r.Form["player_id"])
-	if err != nil {
-		a.renderNewGame(w, r, club, "Ugyldigt spillervalg.")
-		return
-	}
-	ids = dedupeInts(ids)
-	if len(ids) < 4 {
-		a.renderNewGame(w, r, club, "Vælg fire spillere.")
-		return
-	}
-
-	players, err := a.store.PlayersByIDs(club.ID, ids)
+	form, msg, err := a.parseGameForm(r, club)
 	if err != nil {
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
-	if len(players) != len(ids) {
-		a.renderNewGame(w, r, club, "Ukendt spiller.")
+	if msg != "" {
+		a.renderNewGame(w, r, club, msg)
 		return
 	}
 
-	var melderCount, makkerCount, modspilCount int
+	if _, err := a.store.AddGame(club.ID, form.PlayedAt, form.Melding, form.Entries, form.Note); err != nil {
+		slog.Error("add game", "error", err)
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	if r.FormValue("after") == "new" {
+		http.Redirect(w, r, clubPathForRequest(r, &club, "new"), http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, clubPathForRequest(r, &club, "games"), http.StatusSeeOther)
+}
+
+func (a *App) parseGameForm(r *http.Request, club db.Club) (parsedGameForm, string, error) {
+	meldingID, err := strconv.Atoi(strings.TrimSpace(r.FormValue("melding_id")))
+	if err != nil {
+		return parsedGameForm{}, "Vælg en melding.", nil
+	}
+	melding, err := a.store.GetMelding(club.ID, meldingID)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			return parsedGameForm{}, "Ukendt melding.", nil
+		}
+		return parsedGameForm{}, "", err
+	}
+
+	ids, err := parseIDs(r.Form["player_id"])
+	if err != nil {
+		return parsedGameForm{}, "Ugyldigt spillervalg.", nil
+	}
+	ids = dedupeInts(ids)
+	if len(ids) < 4 {
+		return parsedGameForm{}, "Vælg fire spillere.", nil
+	}
+
+	players, err := a.store.PlayersByIDs(club.ID, ids)
+	if err != nil {
+		return parsedGameForm{}, "", err
+	}
+	if len(players) != len(ids) {
+		return parsedGameForm{}, "Ukendt spiller.", nil
+	}
+
 	var inputs []game.PlayerEntry
 	for _, id := range ids {
 		role := strings.TrimSpace(r.FormValue("role_" + strconv.Itoa(id)))
 		switch role {
 		case "melder":
-			melderCount++
 		case "makker":
-			makkerCount++
 		case "modspil":
-			modspilCount++
 		default:
-			a.renderNewGame(w, r, club, "Hver spiller skal have en rolle.")
-			return
+			return parsedGameForm{}, "Hver spiller skal have en rolle.", nil
 		}
 		tricksRaw := strings.TrimSpace(r.FormValue("tricks_" + strconv.Itoa(id)))
 		if tricksRaw == "" {
@@ -112,38 +152,67 @@ func (a *App) handleSaveGame(w http.ResponseWriter, r *http.Request, club db.Clu
 		}
 		tricks, err := strconv.Atoi(tricksRaw)
 		if err != nil || tricks < 0 || tricks > 13 {
-			a.renderNewGame(w, r, club, "Stik skal være 0–13.")
-			return
+			return parsedGameForm{}, "Stik skal være 0–13.", nil
 		}
 		inputs = append(inputs, game.PlayerEntry{PlayerID: id, Role: role, Tricks: tricks})
 	}
-	if melding.Type == db.MeldingTypeNolo {
-		if melderCount != 1 || makkerCount+modspilCount != 3 {
-			a.renderNewGame(w, r, club, "Vælg én melder og tre andre spillere.")
-			return
-		}
-	} else {
-		if melderCount != 1 || makkerCount != 1 {
-			a.renderNewGame(w, r, club, "Vælg én melder og én makker.")
-			return
-		}
+	if msg := gameEntryMessage(melding.Type, game.ValidateEntries(melding.Type, inputs)); msg != "" {
+		return parsedGameForm{}, msg, nil
 	}
 
 	playedAt, msg := parsePlayedAt(r.FormValue("played_at"))
 	if msg != "" {
-		a.renderNewGame(w, r, club, msg)
-		return
+		return parsedGameForm{}, msg, nil
 	}
+	return parsedGameForm{
+		Melding:  melding,
+		Entries:  inputs,
+		PlayedAt: playedAt,
+		Note:     strings.TrimSpace(r.FormValue("note")),
+	}, "", nil
+}
 
-	note := strings.TrimSpace(r.FormValue("note"))
-	if _, err := a.store.AddGame(club.ID, playedAt, melding, inputs, note); err != nil {
-		slog.Error("add game", "error", err)
-		http.Error(w, "db error", http.StatusInternalServerError)
-		return
+func (a *App) loadGameFormPlayers(clubID string, scores []db.PlayerScore) ([]gameFormPlayer, error) {
+	players, err := a.store.ListPlayers(clubID)
+	if err != nil {
+		return nil, err
 	}
-	if r.FormValue("after") == "new" {
-		http.Redirect(w, r, clubPath(&club, "new"), http.StatusSeeOther)
-		return
+	byID := make(map[int]db.PlayerScore, len(scores))
+	for _, score := range scores {
+		byID[score.Player.ID] = score
 	}
-	http.Redirect(w, r, clubPath(&club, "games"), http.StatusSeeOther)
+	formPlayers := make([]gameFormPlayer, 0, len(players))
+	for _, player := range players {
+		formPlayer := gameFormPlayer{Player: player}
+		if score, ok := byID[player.ID]; ok {
+			formPlayer.Role = score.Role
+			formPlayer.Tricks = score.Tricks
+		}
+		formPlayers = append(formPlayers, formPlayer)
+	}
+	return formPlayers, nil
+}
+
+func gameEntryMessage(meldingType string, issues []game.ValidationIssue) string {
+	for _, issue := range issues {
+		switch issue {
+		case game.IssuePlayerCount:
+			return "Vælg fire spillere."
+		case game.IssueMelderCount:
+			if meldingType == db.MeldingTypeNolo {
+				return "Vælg én melder og tre andre spillere."
+			}
+			return "Vælg én melder og én makker."
+		case game.IssueMakkerCount, game.IssueModspilCount:
+			if meldingType == db.MeldingTypeNolo {
+				return "Vælg én melder og tre andre spillere."
+			}
+			return "Vælg én melder og én makker."
+		case game.IssueTrickRange:
+			return "Stik skal være 0–13."
+		case game.IssueTrickSum:
+			return "Stik skal være 13 i alt."
+		}
+	}
+	return ""
 }

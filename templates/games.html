@@ -14,12 +14,12 @@
       {{if .Games}}{{range .Games}}
       <tr>
         <td class="rank hide-small">{{.ID}}</td>
-        <td><a href="/c/{{.ClubID}}/games/{{.ID}}">{{.PlayedAt.Format "2006-01-02"}}</a></td>
+        <td><a href="/c/{{.ClubID}}/games/{{.ID}}{{$.SeasonQuery}}">{{.PlayedAt.Format "2006-01-02"}}</a></td>
         <td class="nowrap">{{.MeldingName}} ({{gameTricks .}}){{if .Note}} <span class="note-indicator" title="{{.Note}}">📝</span>{{end}}</td>
-        <td class="nowrap participants">
-          {{range .Scores}}{{if or (eq .Role "melder") (eq .Role "makker")}}<span>{{.Player.Emoji}} {{.Player.Name}}</span>{{end}}{{end}}
+        <td class="nowrap emoji-strip">
+          {{range .Scores}}{{if or (eq .Role "melder") (eq .Role "makker")}}<span title="{{.Player.Name}}">{{.Player.Emoji}}</span>{{end}}{{end}}
         </td>
-        <td class="hide-small participants emoji-strip">
+        <td class="hide-small nowrap emoji-strip">
           {{range .Scores}}{{if eq .Role "modspil"}}<span title="{{.Player.Name}}">{{.Player.Emoji}}</span>{{end}}{{end}}
         </td>
       </tr>

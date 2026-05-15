@@ -47,17 +47,8 @@ func render(tplName string, w http.ResponseWriter, data any, files ...string) er
 			}
 			return ""
 		},
-		"roleLabel": func(role string) string {
-			switch role {
-			case "melder":
-				return "Melder"
-			case "makker":
-				return "Makker"
-			case "modspil":
-				return "Modspil"
-			}
-			return role
-		},
+		"roleLabel":           roleLabel,
+		"roleLabelForMelding": roleLabelForMelding,
 		"version": func() string {
 			rev := versioninfo.Revision
 			if len(rev) < 7 {
@@ -97,4 +88,23 @@ func render(tplName string, w http.ResponseWriter, data any, files ...string) er
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	return tpl.ExecuteTemplate(w, tplName, data)
+}
+
+func roleLabel(role string) string {
+	switch role {
+	case "melder":
+		return "Melder"
+	case "makker":
+		return "Makker"
+	case "modspil":
+		return "Modspil"
+	}
+	return role
+}
+
+func roleLabelForMelding(role, meldingType string) string {
+	if role == "makker" && meldingType == db.MeldingTypeNolo {
+		return "Går med"
+	}
+	return roleLabel(role)
 }

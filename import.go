@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/martinohansen/whist/internal/db"
+	"github.com/martinohansen/whist/internal/game"
 	"github.com/martinohansen/whist/internal/mistral"
 )
 
@@ -116,7 +118,7 @@ func (a *App) handleAnalyzeImport(w http.ResponseWriter, r *http.Request, club d
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
-	http.Redirect(w, r, clubPath(&club, "import/review"), http.StatusSeeOther)
+	http.Redirect(w, r, clubPathForRequest(r, &club, "import/review"), http.StatusSeeOther)
 }
 
 func (a *App) handleReviewImport(w http.ResponseWriter, r *http.Request, club db.Club) {
@@ -172,7 +174,11 @@ func (a *App) renderReview(w http.ResponseWriter, r *http.Request, club db.Club,
 		Error:      errMsg,
 		Success:    successMsg,
 	}
-	renderTemplate(w, "layout", data, "templates/layout.html", "templates/import_review.html")
+	renderTemplate(w, "layout", data,
+		"templates/layout.html",
+		"templates/game_entry_shared.html",
+		"templates/import_review.html",
+	)
 }
 
 func (a *App) handleSaveDraft(w http.ResponseWriter, r *http.Request, club db.Club, draftID int) {
@@ -224,7 +230,35 @@ func (a *App) handleSaveDraft(w http.ResponseWriter, r *http.Request, club db.Cl
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
-	http.Redirect(w, r, clubPath(&club, "import/review"), http.StatusSeeOther)
+	if strings.Contains(r.Header.Get("Accept"), "application/json") {
+		draft, err := a.store.GetDraft(club.ID, draftID)
+		if err != nil {
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+		meldings, err := a.store.ListMeldings(club.ID)
+		if err != nil {
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+		meldingByID := make(map[int]db.Melding, len(meldings))
+		for _, m := range meldings {
+			meldingByID[m.ID] = m
+		}
+		issues := validateDraft(draft, meldingByID)
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(struct {
+			Valid  bool     `json:"valid"`
+			Issues []string `json:"issues"`
+		}{
+			Valid:  len(issues) == 0,
+			Issues: issues,
+		}); err != nil {
+			slog.Error("encode draft save response", "err", err)
+		}
+		return
+	}
+	http.Redirect(w, r, clubPathForRequest(r, &club, "import/review"), http.StatusSeeOther)
 }
 
 func (a *App) handleDeleteDraft(w http.ResponseWriter, r *http.Request, club db.Club, draftID int) {
@@ -241,7 +275,7 @@ func (a *App) handleDeleteDraft(w http.ResponseWriter, r *http.Request, club db.
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
-	http.Redirect(w, r, clubPath(&club, "import/review"), http.StatusSeeOther)
+	http.Redirect(w, r, clubPathForRequest(r, &club, "import/review"), http.StatusSeeOther)
 }
 
 func (a *App) handleApproveDrafts(w http.ResponseWriter, r *http.Request, club db.Club) {
@@ -265,10 +299,10 @@ func (a *App) handleApproveDrafts(w http.ResponseWriter, r *http.Request, club d
 		return
 	}
 	if created == 0 {
-		http.Redirect(w, r, clubPath(&club, "import/review"), http.StatusSeeOther)
+		http.Redirect(w, r, clubPathForRequest(r, &club, "import/review"), http.StatusSeeOther)
 		return
 	}
-	http.Redirect(w, r, clubPath(&club, "games"), http.StatusSeeOther)
+	http.Redirect(w, r, clubPathForRequest(r, &club, "games"), http.StatusSeeOther)
 }
 
 // renderImportError redirects back to the new-game page with the error
@@ -276,6 +310,9 @@ func (a *App) handleApproveDrafts(w http.ResponseWriter, r *http.Request, club d
 func (a *App) renderImportError(w http.ResponseWriter, r *http.Request, club db.Club, msg string) {
 	v := url.Values{}
 	v.Set("import_error", msg)
+	if raw, explicit := seasonParam(r); explicit {
+		v.Set("season", strings.TrimSpace(raw))
+	}
 	http.Redirect(w, r, clubPath(&club, "new")+"?"+v.Encode(), http.StatusSeeOther)
 }
 
@@ -293,7 +330,7 @@ func (a *App) handleRejectDrafts(w http.ResponseWriter, r *http.Request, club db
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
-	http.Redirect(w, r, clubPath(&club, "new"), http.StatusSeeOther)
+	http.Redirect(w, r, clubPathForRequest(r, &club, "new"), http.StatusSeeOther)
 }
 
 // buildDrafts maps Mistral output to db.Draft rows, resolving melding/player
@@ -369,8 +406,8 @@ func validateDraft(d db.Draft, meldings map[int]db.Melding) []string {
 	if len(d.Scores) != 4 {
 		issues = append(issues, "Skal have 4 spillere")
 	}
-	var melder, makker, modspil int
-	var sum int
+	entries := make([]game.PlayerEntry, 0, len(d.Scores))
+	var melder int
 	for _, sc := range d.Scores {
 		if sc.PlayerID == 0 {
 			issues = append(issues, "Vælg spiller for "+sc.RawName)
@@ -378,14 +415,10 @@ func validateDraft(d db.Draft, meldings map[int]db.Melding) []string {
 		switch sc.Role {
 		case "melder":
 			melder++
-		case "makker":
-			makker++
-		case "modspil":
-			modspil++
 		default:
 			issues = append(issues, "Mangler rolle")
 		}
-		sum += sc.Tricks
+		entries = append(entries, game.PlayerEntry{PlayerID: sc.PlayerID, Role: sc.Role, Tricks: sc.Tricks})
 	}
 	m, hasMelding := meldings[d.MeldingID]
 	if d.MeldingID != 0 && !hasMelding {
@@ -394,19 +427,26 @@ func validateDraft(d db.Draft, meldings map[int]db.Melding) []string {
 	if melder != 1 {
 		issues = append(issues, "Præcis én melder")
 	}
-	if hasMelding && m.Type == db.MeldingTypeNolo {
-		if makker+modspil != 3 {
-			issues = append(issues, "Skal have tre makkere/modspil")
-		}
-	} else if d.MeldingID != 0 {
-		if makker != 1 {
-			issues = append(issues, "Præcis én makker")
-		}
-		if modspil != 2 {
-			issues = append(issues, "Præcis to modspil")
-		}
-		if sum != 13 {
-			issues = append(issues, "Stik skal være 13 i alt")
+	if hasMelding {
+		for _, issue := range game.ValidateEntries(m.Type, entries) {
+			switch issue {
+			case game.IssuePlayerCount:
+				// Already reported above from the draft shape itself.
+			case game.IssueMelderCount:
+				// Already reported above to keep the existing wording.
+			case game.IssueMakkerCount:
+				issues = append(issues, "Præcis én makker")
+			case game.IssueModspilCount:
+				if m.Type == db.MeldingTypeNolo {
+					issues = append(issues, "Skal have tre andre spillere")
+				} else {
+					issues = append(issues, "Præcis to modspil")
+				}
+			case game.IssueTrickRange:
+				issues = append(issues, "Stik skal være 0–13")
+			case game.IssueTrickSum:
+				issues = append(issues, "Stik skal være 13 i alt")
+			}
 		}
 	}
 	return issues

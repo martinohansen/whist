@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +12,8 @@ import (
 	"time"
 
 	"github.com/martinohansen/whist/internal/db"
+	"github.com/martinohansen/whist/internal/game"
+	"github.com/martinohansen/whist/internal/mistral"
 )
 
 // newTestApp returns an App backed by an in-memory sqlite store.
@@ -21,6 +25,18 @@ func newTestApp(t *testing.T) (*App, *db.Store) {
 	}
 	t.Cleanup(func() { store.Close() })
 	return newApp(store, nil), store
+}
+
+type enabledImportClient struct{}
+
+func (enabledImportClient) Enabled() bool { return true }
+
+func (enabledImportClient) OCR(_ context.Context, _ []byte, _ string) (string, error) {
+	return "", nil
+}
+
+func (enabledImportClient) Extract(_ context.Context, _ string, _ []db.Melding, _ []db.Player) ([]mistral.DraftGame, error) {
+	return nil, nil
 }
 
 func get(t *testing.T, h http.Handler, path string) *httptest.ResponseRecorder {
@@ -136,6 +152,18 @@ func TestCreateClubAndVisitAllPages(t *testing.T) {
 	}
 }
 
+func TestNewGamePageHasNoCancelLink(t *testing.T) {
+	app, _ := newTestApp(t)
+	h := app.routes()
+	id := createClub(t, h, "Testklub")
+
+	rec := get(t, h, "/c/"+id+"/new")
+	assertStatus(t, rec, http.StatusOK)
+	if strings.Contains(rec.Body.String(), "Annuller") {
+		t.Fatalf("new game page still renders cancel link: %s", rec.Body.String())
+	}
+}
+
 func TestAddPlayerAndPlayGame(t *testing.T) {
 	app, store := newTestApp(t)
 	h := app.routes()
@@ -206,6 +234,157 @@ func TestAddPlayerAndPlayGame(t *testing.T) {
 		if sc.Score != want {
 			t.Errorf("player %s role %s: score=%d want=%d", sc.Player.Name, sc.Role, sc.Score, want)
 		}
+	}
+}
+
+func TestGameDetailAllowsEditingAndBrowsingAdjacentGames(t *testing.T) {
+	app, store := newTestApp(t)
+	h := app.routes()
+	id := createClub(t, h, "Testklub")
+
+	var players []db.Player
+	for _, name := range []string{"Anna", "Bo", "Carl", "Dorthe"} {
+		player, err := store.AddPlayer(id, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		players = append(players, player)
+	}
+	meldings, err := store.ListMeldings(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := []game.PlayerEntry{
+		{PlayerID: players[0].ID, Role: "melder", Tricks: 4},
+		{PlayerID: players[1].ID, Role: "makker", Tricks: 3},
+		{PlayerID: players[2].ID, Role: "modspil", Tricks: 3},
+		{PlayerID: players[3].ID, Role: "modspil", Tricks: 3},
+	}
+	olderID, err := store.AddGame(id, mustDate(t, "2026-05-10"), meldings[0], entries, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentID, err := store.AddGame(id, mustDate(t, "2026-05-11"), meldings[0], entries, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newerID, err := store.AddGame(id, mustDate(t, "2026-05-12"), meldings[0], entries, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := get(t, h, "/c/"+id+"/games/"+itoa(currentID))
+	assertStatus(t, rec, http.StatusOK)
+	body := rec.Body.String()
+	for _, want := range []string{
+		`<title>Testklub — Spil #` + itoa(currentID) + `</title>`,
+		`action="/c/` + id + `/games/` + itoa(currentID) + `/edit"`,
+		`href="/c/` + id + `/games/` + itoa(olderID) + `"`,
+		`href="/c/` + id + `/games/` + itoa(newerID) + `"`,
+		`Spil #` + itoa(currentID) + ` d. 2026-05-11 melding 7 (7)`,
+		`<div class="game-header">`,
+		`class="badge badge-nav"`,
+		`class="game-nav-arrow"`,
+		`class="game-id-display">#` + itoa(currentID) + `</span>`,
+		`Forrige spil`,
+		`Næste spil`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("game detail missing %q: %s", want, body)
+		}
+	}
+	for _, unwanted := range []string{"Spillet 2026-05-11", " -- ", "Tilbage", "Slet spil"} {
+		if strings.Contains(body, unwanted) {
+			t.Fatalf("game detail still renders %q: %s", unwanted, body)
+		}
+	}
+}
+
+func TestEditGameUpdatesStoredGame(t *testing.T) {
+	app, store := newTestApp(t)
+	h := app.routes()
+	id := createClub(t, h, "Testklub")
+
+	var players []db.Player
+	for _, name := range []string{"Anna", "Bo", "Carl", "Dorthe"} {
+		player, err := store.AddPlayer(id, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		players = append(players, player)
+	}
+	meldings, err := store.ListMeldings(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gameID, err := store.AddGame(id, mustDate(t, "2026-05-11"), meldings[0], []game.PlayerEntry{
+		{PlayerID: players[0].ID, Role: "melder", Tricks: 4},
+		{PlayerID: players[1].ID, Role: "makker", Tricks: 3},
+		{PlayerID: players[2].ID, Role: "modspil", Tricks: 3},
+		{PlayerID: players[3].ID, Role: "modspil", Tricks: 3},
+	}, "før")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	editRec := get(t, h, "/c/"+id+"/games/"+itoa(gameID)+"/edit")
+	assertStatus(t, editRec, http.StatusOK)
+	editBody := editRec.Body.String()
+	for _, want := range []string{
+		`action="/c/` + id + `/games/` + itoa(gameID) + `/update"`,
+		`data-role="melder"`,
+		`name="tricks_` + itoa(players[0].ID) + `" value="4"`,
+		`formaction="/c/` + id + `/games/` + itoa(gameID) + `/delete"`,
+	} {
+		if !strings.Contains(editBody, want) {
+			t.Fatalf("edit page missing %q: %s", want, editBody)
+		}
+	}
+	if strings.Contains(editBody, "Annuller") {
+		t.Fatalf("edit page still renders cancel link: %s", editBody)
+	}
+
+	form := url.Values{
+		"played_at":  {"2026-05-12"},
+		"melding_id": {itoa(meldings[1].ID)},
+		"note":       {"efter"},
+	}
+	for i, player := range players {
+		pid := itoa(player.ID)
+		form.Add("player_id", pid)
+		switch i {
+		case 0:
+			form.Set("role_"+pid, "melder")
+			form.Set("tricks_"+pid, "5")
+		case 1:
+			form.Set("role_"+pid, "makker")
+			form.Set("tricks_"+pid, "4")
+		default:
+			form.Set("role_"+pid, "modspil")
+			form.Set("tricks_"+pid, "2")
+		}
+	}
+
+	rec := post(t, h, "/c/"+id+"/games/"+itoa(gameID)+"/update", form)
+	assertStatus(t, rec, http.StatusSeeOther)
+	if got, want := rec.Header().Get("Location"), "/c/"+id+"/games/"+itoa(gameID); got != want {
+		t.Fatalf("redirect=%q want %q", got, want)
+	}
+	updated, err := store.GetGame(id, gameID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := updated.PlayedAt.Format(dateLayout), "2026-05-12"; got != want {
+		t.Fatalf("played_at=%q want %q", got, want)
+	}
+	if got, want := updated.MeldingID, meldings[1].ID; got != want {
+		t.Fatalf("melding_id=%d want %d", got, want)
+	}
+	if got, want := updated.Note, "efter"; got != want {
+		t.Fatalf("note=%q want %q", got, want)
+	}
+	if len(updated.Scores) != 4 {
+		t.Fatalf("scores=%d want 4", len(updated.Scores))
 	}
 }
 
@@ -325,6 +504,111 @@ func TestSaveGameAndAddAnotherRedirectsToNewGame(t *testing.T) {
 	}
 }
 
+func TestSaveGameRedirectPreservesSelectedSeason(t *testing.T) {
+	app, store := newTestApp(t)
+	h := app.routes()
+
+	id := createClub(t, h, "Testklub")
+	if err := store.AddSeason(id, "Forår", "2026-01-01", "2026-06-30"); err != nil {
+		t.Fatal(err)
+	}
+	seasons, err := store.ListSeasons(id)
+	if err != nil || len(seasons) != 1 {
+		t.Fatalf("list seasons: err=%v len=%d", err, len(seasons))
+	}
+	for _, name := range []string{"Anna", "Bo", "Carl", "Dorthe"} {
+		rec := post(t, h, "/c/"+id+"/players/add", url.Values{"name": {name}})
+		assertStatus(t, rec, http.StatusSeeOther)
+	}
+	players, err := store.ListPlayers(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meldings, err := store.ListMeldings(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	form := url.Values{
+		"played_at":  {"2026-05-11"},
+		"melding_id": {itoa(meldings[0].ID)},
+		"season":     {itoa(seasons[0].ID)},
+	}
+	for i, p := range players {
+		pid := itoa(p.ID)
+		form.Add("player_id", pid)
+		switch i {
+		case 0:
+			form.Set("role_"+pid, "melder")
+			form.Set("tricks_"+pid, "4")
+		case 1:
+			form.Set("role_"+pid, "makker")
+			form.Set("tricks_"+pid, "3")
+		default:
+			form.Set("role_"+pid, "modspil")
+			form.Set("tricks_"+pid, "3")
+		}
+	}
+
+	rec := post(t, h, "/c/"+id+"/games/save", form)
+	assertStatus(t, rec, http.StatusSeeOther)
+	if got, want := rec.Header().Get("Location"), "/c/"+id+"/games?season="+itoa(seasons[0].ID); got != want {
+		t.Fatalf("redirect=%q want %q", got, want)
+	}
+}
+
+func TestSaveGameRejectsMoreThanFourPlayers(t *testing.T) {
+	app, store := newTestApp(t)
+	h := app.routes()
+
+	id := createClub(t, h, "Testklub")
+	for _, name := range []string{"Anna", "Bo", "Carl", "Dorthe", "Erik"} {
+		rec := post(t, h, "/c/"+id+"/players/add", url.Values{"name": {name}})
+		assertStatus(t, rec, http.StatusSeeOther)
+	}
+	players, err := store.ListPlayers(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meldings, err := store.ListMeldings(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	form := url.Values{
+		"played_at":  {"2026-05-11"},
+		"melding_id": {itoa(meldings[0].ID)},
+	}
+	for i, p := range players {
+		pid := itoa(p.ID)
+		form.Add("player_id", pid)
+		switch i {
+		case 0:
+			form.Set("role_"+pid, "melder")
+			form.Set("tricks_"+pid, "4")
+		case 1:
+			form.Set("role_"+pid, "makker")
+			form.Set("tricks_"+pid, "3")
+		default:
+			form.Set("role_"+pid, "modspil")
+			form.Set("tricks_"+pid, "2")
+		}
+	}
+
+	rec := post(t, h, "/c/"+id+"/games/save", form)
+	assertStatus(t, rec, http.StatusOK)
+	if !strings.Contains(rec.Body.String(), "Vælg fire spillere.") {
+		t.Fatalf("missing too-many-players error: %s", rec.Body.String())
+	}
+	games, err := store.ListGames(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(games) != 0 {
+		t.Fatalf("saved %d games with five players; want 0", len(games))
+	}
+}
+
 func TestMeldingSettingsPreserveSubmittedOrder(t *testing.T) {
 	app, store := newTestApp(t)
 	h := app.routes()
@@ -334,6 +618,7 @@ func TestMeldingSettingsPreserveSubmittedOrder(t *testing.T) {
 		"name":           {"Testklub"},
 		"rules":          {""},
 		"visibility":     {"private"},
+		"melding_id":     {"", ""},
 		"melding_name":   {"Ren sol", "7"},
 		"melding_type":   {"nolo", "normal"},
 		"melding_bid":    {"1", "7"},
@@ -360,6 +645,254 @@ func TestMeldingSettingsPreserveSubmittedOrder(t *testing.T) {
 	}
 }
 
+func TestInvalidSettingsDoNotPartiallySave(t *testing.T) {
+	app, store := newTestApp(t)
+	h := app.routes()
+
+	id := createClub(t, h, "Original")
+	before, err := store.GetClub(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := post(t, h, "/c/"+id+"/settings/save", url.Values{
+		"name":           {"Changed"},
+		"rules":          {"new rules"},
+		"visibility":     {"private"},
+		"melding_id":     {"", ""},
+		"melding_name":   {"Ren sol", "7"},
+		"melding_type":   {"nolo", "normal"},
+		"melding_bid":    {"1", "7"},
+		"melding_points": {"3", "1"},
+		"player_id":      {},
+		"player_name":    {},
+		"player_emoji":   {},
+		"season_id":      {""},
+		"season_name":    {"Broken season"},
+		"season_start":   {"2026-06-01"},
+		"season_end":     {"2026-05-01"},
+	})
+	assertStatus(t, rec, http.StatusOK)
+	if !strings.Contains(rec.Body.String(), "Startdato skal være før slutdato.") {
+		t.Fatalf("settings error missing from response: %s", rec.Body.String())
+	}
+
+	after, err := store.GetClub(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Name != before.Name || after.Rules != before.Rules {
+		t.Fatalf("club changed after rejected settings save: before=%+v after=%+v", before, after)
+	}
+	meldings, err := store.ListMeldings(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(meldings), len(db.DefaultMeldings); got != want {
+		t.Fatalf("meldings len=%d want %d after rejected settings save", got, want)
+	}
+}
+
+func TestSettingsSaveKeepsExistingMeldingsWhenGamesReferenceThem(t *testing.T) {
+	app, store := newTestApp(t)
+	h := app.routes()
+	id := createClub(t, h, "Original")
+
+	var players []db.Player
+	for _, name := range []string{"Anna", "Bo", "Carl", "Dorthe"} {
+		player, err := store.AddPlayer(id, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		players = append(players, player)
+	}
+	meldings, err := store.ListMeldings(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddGame(id, mustDate(t, "2026-05-11"), meldings[0], []game.PlayerEntry{
+		{PlayerID: players[0].ID, Role: "melder", Tricks: 4},
+		{PlayerID: players[1].ID, Role: "makker", Tricks: 3},
+		{PlayerID: players[2].ID, Role: "modspil", Tricks: 3},
+		{PlayerID: players[3].ID, Role: "modspil", Tricks: 3},
+	}, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	form := url.Values{
+		"name":         {"Rettet klub"},
+		"rules":        {""},
+		"visibility":   {"private"},
+		"player_id":    {},
+		"player_name":  {},
+		"player_emoji": {},
+		"season_id":    {},
+		"season_name":  {},
+		"season_start": {},
+		"season_end":   {},
+	}
+	for _, melding := range meldings {
+		form.Add("melding_id", itoa(melding.ID))
+		form.Add("melding_name", melding.Name)
+		form.Add("melding_type", melding.Type)
+		form.Add("melding_bid", itoa(melding.Bid))
+		form.Add("melding_points", itoa(melding.Points))
+	}
+
+	rec := post(t, h, "/c/"+id+"/settings/save", form)
+	assertStatus(t, rec, http.StatusOK)
+	if !strings.Contains(rec.Body.String(), "Gemt.") {
+		t.Fatalf("save did not succeed: %s", rec.Body.String())
+	}
+	updated, err := store.GetClub(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := updated.Name, "Rettet klub"; got != want {
+		t.Fatalf("name=%q want %q", got, want)
+	}
+	after, err := store.ListMeldings(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := after[0].ID, meldings[0].ID; got != want {
+		t.Fatalf("first melding id=%d want preserved id %d", got, want)
+	}
+}
+
+func TestSortLeaderboardRowsByGames(t *testing.T) {
+	rows := []leaderboardRow{
+		{Rank: 1, Player: db.Player{Name: "Anna"}, Games: 2, Points: 10},
+		{Rank: 2, Player: db.Player{Name: "Bo"}, Games: 4, Points: 8},
+		{Rank: 3, Player: db.Player{Name: "Carl"}, Games: 1, Points: 6},
+	}
+	sortLeaderboardRows(rows, "games", "desc")
+	if got, want := []string{rows[0].Player.Name, rows[1].Player.Name, rows[2].Player.Name}, []string{"Bo", "Anna", "Carl"}; !equalStrings(got, want) {
+		t.Fatalf("sorted names=%v want %v", got, want)
+	}
+}
+
+func TestLeaderboardSortLinksPreserveSeason(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/c/club?season=7&sort=points&dir=desc", nil)
+	links := leaderboardSortLinks(req, "/c/club", "points", "desc")
+	if got, want := links["games"], "/c/club?dir=desc&season=7&sort=games"; got != want {
+		t.Fatalf("games link=%q want %q", got, want)
+	}
+	if got, want := links["points"], "/c/club?dir=asc&season=7&sort=points"; got != want {
+		t.Fatalf("points link=%q want %q", got, want)
+	}
+}
+
+func TestNavigationLinksPreserveSelectedSeason(t *testing.T) {
+	app, store := newTestApp(t)
+	h := app.routes()
+
+	id := createClub(t, h, "Testklub")
+	if err := store.AddSeason(id, "Forår", "2026-01-01", "2026-06-30"); err != nil {
+		t.Fatal(err)
+	}
+	seasons, err := store.ListSeasons(id)
+	if err != nil || len(seasons) != 1 {
+		t.Fatalf("list seasons: err=%v len=%d", err, len(seasons))
+	}
+
+	rec := get(t, h, "/c/"+id+"?season="+itoa(seasons[0].ID))
+	assertStatus(t, rec, http.StatusOK)
+	body := rec.Body.String()
+	for _, want := range []string{
+		`href="/c/` + id + `?season=` + itoa(seasons[0].ID) + `"`,
+		`href="/c/` + id + `/games?season=` + itoa(seasons[0].ID) + `"`,
+		`href="/c/` + id + `/settings?season=` + itoa(seasons[0].ID) + `"`,
+		`href="/c/` + id + `/new?season=` + itoa(seasons[0].ID) + `"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("navigation missing %q: %s", want, body)
+		}
+	}
+}
+
+func TestRoleLabelForMeldingUsesJoinerForNolo(t *testing.T) {
+	if got, want := roleLabelForMelding("makker", db.MeldingTypeNolo), "Går med"; got != want {
+		t.Fatalf("nolo role label=%q want %q", got, want)
+	}
+	if got, want := roleLabelForMelding("makker", db.MeldingTypeNormal), "Makker"; got != want {
+		t.Fatalf("normal role label=%q want %q", got, want)
+	}
+}
+
+func TestSaveDraftJSONReturnsServerValidity(t *testing.T) {
+	store, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	app := newApp(store, enabledImportClient{})
+	h := app.routes()
+
+	id := createClub(t, h, "Importklub")
+	var players []db.Player
+	for _, name := range []string{"Anna", "Bo", "Carl", "Dorthe"} {
+		p, err := store.AddPlayer(id, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		players = append(players, p)
+	}
+	meldings, err := store.ListMeldings(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddDrafts(id, "batch", []db.Draft{{MeldingID: meldings[0].ID}}); err != nil {
+		t.Fatal(err)
+	}
+	drafts, err := store.ListPendingDrafts(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(drafts) != 1 {
+		t.Fatalf("drafts=%d want 1", len(drafts))
+	}
+
+	form := url.Values{
+		"played_at":  {"2026-05-11"},
+		"melding_id": {itoa(meldings[0].ID)},
+	}
+	for i, p := range players {
+		form.Set("player_id_"+itoa(i), itoa(p.ID))
+		form.Set("raw_name_"+itoa(i), p.Name)
+		switch i {
+		case 0:
+			form.Set("role_"+itoa(i), "melder")
+			form.Set("tricks_"+itoa(i), "4")
+		case 1:
+			form.Set("role_"+itoa(i), "makker")
+			form.Set("tricks_"+itoa(i), "3")
+		default:
+			form.Set("role_"+itoa(i), "modspil")
+			form.Set("tricks_"+itoa(i), "2")
+		}
+	}
+	req := httptest.NewRequest(http.MethodPost, "/c/"+id+"/import/"+itoa(drafts[0].ID)+"/save", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	assertStatus(t, rec, http.StatusOK)
+	var got struct {
+		Valid  bool     `json:"valid"`
+		Issues []string `json:"issues"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Valid {
+		t.Fatalf("valid=true want false; issues=%v", got.Issues)
+	}
+	if !containsString(got.Issues, "Stik skal være 13 i alt") {
+		t.Fatalf("issues=%v; want trick-sum issue", got.Issues)
+	}
+}
+
 func TestClubRouteRateLimit(t *testing.T) {
 	app, _ := newTestApp(t)
 	app.clubLimiter = newRateLimiter(2, time.Minute)
@@ -377,6 +910,27 @@ func TestClubRouteRateLimit(t *testing.T) {
 	if got := rec.Header().Get("Retry-After"); got != "" {
 		t.Fatalf("Retry-After=%q want empty", got)
 	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func itoa(i int) string {
@@ -401,4 +955,13 @@ func itoa(i int) string {
 		b[pos] = '-'
 	}
 	return string(b[pos:])
+}
+
+func mustDate(t *testing.T, value string) time.Time {
+	t.Helper()
+	parsed, err := time.Parse(dateLayout, value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return parsed
 }

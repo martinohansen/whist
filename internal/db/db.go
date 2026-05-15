@@ -67,6 +67,7 @@ type Game struct {
 	ID            int
 	ClubID        string
 	PlayedAt      time.Time
+	MeldingID     int
 	MeldingName   string
 	MeldingType   string
 	Bid           int
@@ -138,6 +139,7 @@ CREATE TABLE IF NOT EXISTS games (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	club_id TEXT NOT NULL REFERENCES clubs(id) ON DELETE CASCADE,
 	played_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	melding_id INTEGER NOT NULL REFERENCES meldings(id),
 	melding_name TEXT NOT NULL DEFAULT '',
 	melding_type TEXT NOT NULL DEFAULT 'normal',
 	bid INTEGER NOT NULL DEFAULT 0,
@@ -195,38 +197,6 @@ CREATE TABLE IF NOT EXISTS game_draft_scores (
 `
 	if _, err := db.Exec(schema); err != nil {
 		return err
-	}
-	// Migrations for older databases.
-	for _, alter := range []string{
-		`ALTER TABLE clubs ADD COLUMN emoji TEXT NOT NULL DEFAULT '🃏'`,
-		`ALTER TABLE clubs ADD COLUMN rules TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE meldings ADD COLUMN type TEXT NOT NULL DEFAULT 'normal'`,
-		`ALTER TABLE games ADD COLUMN melding_type TEXT NOT NULL DEFAULT 'normal'`,
-	} {
-		if _, err := db.Exec(alter); err != nil && !strings.Contains(err.Error(), "duplicate column") {
-			return err
-		}
-	}
-	// Backfill name-derived emojis for clubs still holding the placeholder.
-	rows, err := db.Query(`SELECT id, name FROM clubs WHERE emoji IN ('', '🃏')`)
-	if err != nil {
-		return err
-	}
-	type pair struct{ id, name string }
-	var pending []pair
-	for rows.Next() {
-		var p pair
-		if err := rows.Scan(&p.id, &p.name); err != nil {
-			rows.Close()
-			return err
-		}
-		pending = append(pending, p)
-	}
-	rows.Close()
-	for _, p := range pending {
-		if _, err := db.Exec(`UPDATE clubs SET emoji = ? WHERE id = ?`, emoji(p.name), p.id); err != nil {
-			return err
-		}
 	}
 	return nil
 }
@@ -648,27 +618,16 @@ func (s *Store) AddGame(clubID string, playedAt time.Time, m Melding, scores []g
 	if mtype == "" {
 		mtype = MeldingTypeNormal
 	}
-	res, err := tx.Exec(`INSERT INTO games (club_id, played_at, melding_name, melding_type, bid, melding_points, note)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`, clubID, playedAt, m.Name, mtype, m.Bid, m.Points, note)
+	res, err := tx.Exec(`INSERT INTO games (club_id, played_at, melding_id, melding_name, melding_type, bid, melding_points, note)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, clubID, playedAt, m.ID, m.Name, mtype, m.Bid, m.Points, note)
 	if err != nil {
 		return 0, err
 	}
 	id64, _ := res.LastInsertId()
 	gameID := int(id64)
 
-	pts := game.ComputeScores(mtype, m.Bid, m.Points, scores)
-	for _, sc := range scores {
-		var club string
-		if err := tx.QueryRow(`SELECT club_id FROM players WHERE id = ?`, sc.PlayerID).Scan(&club); err != nil {
-			return 0, fmt.Errorf("player %d: %w", sc.PlayerID, err)
-		}
-		if club != clubID {
-			return 0, fmt.Errorf("player %d not in club", sc.PlayerID)
-		}
-		if _, err := tx.Exec(`INSERT INTO game_scores (game_id, player_id, role, tricks, score) VALUES (?, ?, ?, ?, ?)`,
-			gameID, sc.PlayerID, sc.Role, sc.Tricks, pts[sc.PlayerID]); err != nil {
-			return 0, err
-		}
+	if err := replaceGameScoresTx(tx, clubID, gameID, mtype, m.Bid, m.Points, scores); err != nil {
+		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
@@ -678,7 +637,7 @@ func (s *Store) AddGame(clubID string, playedAt time.Time, m Melding, scores []g
 
 func (s *Store) ListGames(clubID string) ([]Game, error) {
 	rows, err := s.db.Query(`
-		SELECT id, club_id, played_at, melding_name, melding_type, bid, melding_points, note, created_at
+		SELECT id, club_id, played_at, melding_id, melding_name, melding_type, bid, melding_points, note, created_at
 		FROM games WHERE club_id = ?
 		ORDER BY played_at DESC, id DESC`, clubID)
 	if err != nil {
@@ -689,7 +648,7 @@ func (s *Store) ListGames(clubID string) ([]Game, error) {
 	var ids []int
 	for rows.Next() {
 		var g Game
-		if err := rows.Scan(&g.ID, &g.ClubID, &g.PlayedAt, &g.MeldingName, &g.MeldingType, &g.Bid, &g.MeldingPoints, &g.Note, &g.CreatedAt); err != nil {
+		if err := rows.Scan(&g.ID, &g.ClubID, &g.PlayedAt, &g.MeldingID, &g.MeldingName, &g.MeldingType, &g.Bid, &g.MeldingPoints, &g.Note, &g.CreatedAt); err != nil {
 			return nil, err
 		}
 		games = append(games, g)
@@ -715,9 +674,9 @@ func (s *Store) ListGames(clubID string) ([]Game, error) {
 func (s *Store) GetGame(clubID string, id int) (Game, error) {
 	var g Game
 	err := s.db.QueryRow(`
-		SELECT id, club_id, played_at, melding_name, melding_type, bid, melding_points, note, created_at
+		SELECT id, club_id, played_at, melding_id, melding_name, melding_type, bid, melding_points, note, created_at
 		FROM games WHERE club_id = ? AND id = ?`, clubID, id).
-		Scan(&g.ID, &g.ClubID, &g.PlayedAt, &g.MeldingName, &g.MeldingType, &g.Bid, &g.MeldingPoints, &g.Note, &g.CreatedAt)
+		Scan(&g.ID, &g.ClubID, &g.PlayedAt, &g.MeldingID, &g.MeldingName, &g.MeldingType, &g.Bid, &g.MeldingPoints, &g.Note, &g.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Game{}, ErrNotFound
 	}
@@ -740,6 +699,56 @@ func (s *Store) DeleteGame(clubID string, id int) error {
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) UpdateGame(clubID string, id int, playedAt time.Time, m Melding, scores []game.PlayerEntry, note string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	mtype := m.Type
+	if mtype == "" {
+		mtype = MeldingTypeNormal
+	}
+	res, err := tx.Exec(`
+		UPDATE games
+		SET played_at = ?, melding_id = ?, melding_name = ?, melding_type = ?, bid = ?, melding_points = ?, note = ?
+		WHERE club_id = ? AND id = ?`,
+		playedAt, m.ID, m.Name, mtype, m.Bid, m.Points, note, clubID, id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	if _, err := tx.Exec(`DELETE FROM game_scores WHERE game_id = ?`, id); err != nil {
+		return err
+	}
+	if err := replaceGameScoresTx(tx, clubID, id, mtype, m.Bid, m.Points, scores); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func replaceGameScoresTx(tx *sql.Tx, clubID string, gameID int, mtype string, bid int, points int, scores []game.PlayerEntry) error {
+	computed := game.ComputeScores(mtype, bid, points, scores)
+	for _, sc := range scores {
+		var club string
+		if err := tx.QueryRow(`SELECT club_id FROM players WHERE id = ?`, sc.PlayerID).Scan(&club); err != nil {
+			return fmt.Errorf("player %d: %w", sc.PlayerID, err)
+		}
+		if club != clubID {
+			return fmt.Errorf("player %d not in club", sc.PlayerID)
+		}
+		if _, err := tx.Exec(`INSERT INTO game_scores (game_id, player_id, role, tricks, score) VALUES (?, ?, ?, ?, ?)`,
+			gameID, sc.PlayerID, sc.Role, sc.Tricks, computed[sc.PlayerID]); err != nil {
+			return err
+		}
 	}
 	return nil
 }

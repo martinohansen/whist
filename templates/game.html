@@ -1,8 +1,24 @@
 {{define "content"}}
 <div class="stack">
   <div class="game-header">
-    <h2 class="stat-label">Spil #{{.Game.ID}} — {{.Game.MeldingName}} ({{.Game.Bid}})</h2>
-    <span class="badge">{{.Game.PlayedAt.Format "2006-01-02"}}</span>
+    <h2 class="stat-label">Spil #{{.Game.ID}} d. {{.Game.PlayedAt.Format "2006-01-02"}} melding {{.Game.MeldingName}} ({{gameTricks .Game}})</h2>
+    <div class="badge badge-nav" aria-label="Bladr mellem spil">
+      {{if .OlderGame}}
+      <a href="/c/{{$.Club.ID}}/games/{{.OlderGame.ID}}{{$.SeasonQuery}}"
+         class="game-nav-arrow"
+         aria-label="Forrige spil">‹</a>
+      {{else}}
+      <span class="game-nav-arrow game-nav-disabled">‹</span>
+      {{end}}
+      <span class="game-id-display">#{{.Game.ID}}</span>
+      {{if .NewerGame}}
+      <a href="/c/{{$.Club.ID}}/games/{{.NewerGame.ID}}{{$.SeasonQuery}}"
+         class="game-nav-arrow"
+         aria-label="Næste spil">›</a>
+      {{else}}
+      <span class="game-nav-arrow game-nav-disabled">›</span>
+      {{end}}
+    </div>
   </div>
 
   <table class="table">
@@ -18,7 +34,7 @@
       {{range .Game.Scores}}
       <tr>
         <td class="name"><span>{{.Player.Emoji}}</span> {{.Player.Name}}</td>
-        <td>{{roleIcon .Role}} {{roleLabel .Role}}</td>
+        <td>{{roleIcon .Role}} {{roleLabelForMelding .Role $.Game.MeldingType}}</td>
         <td class="num">{{.Tricks}}</td>
         <td class="num"><strong>{{.Score}}</strong></td>
       </tr>
@@ -31,10 +47,11 @@
   <p>{{.Game.Note}}</p>
   {{end}}
 
-  <form action="/c/{{.Club.ID}}/games/{{.Game.ID}}/delete" method="post" class="actions"
-        onsubmit="return confirm('Slet dette spil?');">
-    <a href="/c/{{.Club.ID}}/games" class="link-padded">Tilbage</a>
-    <button type="submit" class="danger">Slet spil</button>
-  </form>
+  <div class="game-actions">
+    <form action="/c/{{.Club.ID}}/games/{{.Game.ID}}/edit" method="get" class="game-edit-form">
+      {{if .SeasonQuery}}<input type="hidden" name="season" value="{{.SeasonID}}" />{{end}}
+      <button type="submit" class="ghost">Ret spil</button>
+    </form>
+  </div>
 </div>
 {{end}}

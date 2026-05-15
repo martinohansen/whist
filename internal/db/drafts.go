@@ -3,7 +3,6 @@ package db
 import (
 	"database/sql"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 
@@ -281,8 +280,6 @@ func (s *Store) ApproveDrafts(clubID string) (created int, skipped []int, err er
 			return 0, nil, err
 		}
 		var entries []game.PlayerEntry
-		var meld, makker, modspil int
-		var trickSum int
 		bad := false
 		for sRows.Next() {
 			var pid, tricks int
@@ -296,33 +293,16 @@ func (s *Store) ApproveDrafts(clubID string) (created int, skipped []int, err er
 				continue
 			}
 			switch role {
-			case "melder":
-				meld++
-			case "makker":
-				makker++
-			case "modspil":
-				modspil++
+			case game.RoleMelder, game.RoleMakker, game.RoleModspil:
 			default:
 				bad = true
 			}
-			trickSum += tricks
 			entries = append(entries, game.PlayerEntry{PlayerID: pid, Role: role, Tricks: tricks})
 		}
 		sRows.Close()
-		if bad || len(entries) != 4 || meld != 1 {
+		if bad || len(game.ValidateEntries(m.Type, entries)) > 0 {
 			skipped = append(skipped, p.id)
 			continue
-		}
-		if m.Type == MeldingTypeNolo {
-			if makker+modspil != 3 {
-				skipped = append(skipped, p.id)
-				continue
-			}
-		} else {
-			if makker != 1 || modspil != 2 || trickSum != 13 {
-				skipped = append(skipped, p.id)
-				continue
-			}
 		}
 
 		playedAt := time.Now()
@@ -359,29 +339,15 @@ func insertGameTx(tx *sql.Tx, clubID string, playedAt time.Time, m Melding, scor
 	if mtype == "" {
 		mtype = MeldingTypeNormal
 	}
-	res, err := tx.Exec(`INSERT INTO games (club_id, played_at, melding_name, melding_type, bid, melding_points, note)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`, clubID, playedAt, m.Name, mtype, m.Bid, m.Points, note)
+	res, err := tx.Exec(`INSERT INTO games (club_id, played_at, melding_id, melding_name, melding_type, bid, melding_points, note)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, clubID, playedAt, m.ID, m.Name, mtype, m.Bid, m.Points, note)
 	if err != nil {
 		return err
 	}
 	id64, _ := res.LastInsertId()
 	gameID := int(id64)
 
-	pts := game.ComputeScores(mtype, m.Bid, m.Points, scores)
-	for _, sc := range scores {
-		var club string
-		if err := tx.QueryRow(`SELECT club_id FROM players WHERE id = ?`, sc.PlayerID).Scan(&club); err != nil {
-			return fmt.Errorf("player %d: %w", sc.PlayerID, err)
-		}
-		if club != clubID {
-			return fmt.Errorf("player %d not in club", sc.PlayerID)
-		}
-		if _, err := tx.Exec(`INSERT INTO game_scores (game_id, player_id, role, tricks, score) VALUES (?, ?, ?, ?, ?)`,
-			gameID, sc.PlayerID, sc.Role, sc.Tricks, pts[sc.PlayerID]); err != nil {
-			return err
-		}
-	}
-	return nil
+	return replaceGameScoresTx(tx, clubID, gameID, mtype, m.Bid, m.Points, scores)
 }
 
 func (s *Store) loadDraftScores(draftIDs []int) (map[int][]DraftScore, error) {

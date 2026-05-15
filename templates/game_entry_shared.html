@@ -1,0 +1,65 @@
+{{define "game-entry-shared-script"}}
+function roleCounts() {
+  const counts = { melder: 0, makker: 0, modspil: 0 };
+  cards.forEach(function (c) {
+    const r = getRole(c);
+    if (r in counts) counts[r]++;
+  });
+  return counts;
+}
+
+function nextFreeSlot() {
+  const counts = roleCounts();
+  if (counts.melder < 1) return "melder";
+  if (isNolo()) {
+    if (counts.makker + counts.modspil < 3) return "modspil";
+    return "";
+  }
+  if (counts.makker < 1) return "makker";
+  if (counts.modspil < 2) return "modspil";
+  return "";
+}
+
+function adjustTricks(card, delta) {
+  const active = activeCards();
+  if (active.length < 2) {
+    const cur = getTricks(card);
+    let next = cur + delta;
+    next = ((next % 14) + 14) % 14;
+    setTricksVal(card, next);
+    return;
+  }
+  const cur = getTricks(card);
+  let next = cur + delta;
+  next = ((next % 14) + 14) % 14;
+  const realDelta = next - cur;
+  setTricksVal(card, next);
+
+  let need = -realDelta;
+  if (need === 0) return;
+  let i = active.indexOf(card);
+  let safety = active.length * 14 + 4;
+  while (need !== 0 && safety-- > 0) {
+    i = (i + 1) % active.length;
+    const c = active[i];
+    if (c === card) continue;
+    const cv = getTricks(c);
+    if (need > 0 && cv < 13) {
+      setTricksVal(c, cv + 1);
+      need--;
+    } else if (need < 0 && cv > 0) {
+      setTricksVal(c, cv - 1);
+      need++;
+    }
+  }
+}
+
+function playerEmoji(card) {
+  const el = card.querySelector(".player-emoji");
+  return el ? el.textContent : "";
+}
+
+function fmtScore(n) {
+  return (n >= 0 ? "+" : "") + n;
+}
+{{end}}

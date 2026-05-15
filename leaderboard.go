@@ -2,6 +2,8 @@ package main
 
 import (
 	"net/http"
+	"net/url"
+	"sort"
 	"time"
 
 	"github.com/martinohansen/whist/internal/db"
@@ -28,6 +30,9 @@ type leaderboardData struct {
 	Selected       *db.Season
 	SeasonID       int
 	SeasonExplicit bool
+	SortKey        string
+	SortDir        string
+	SortLinks      map[string]string
 }
 
 func (a *App) handleLeaderboard(w http.ResponseWriter, r *http.Request, club db.Club) {
@@ -102,6 +107,8 @@ func (a *App) handleLeaderboard(w http.ResponseWriter, r *http.Request, club db.
 		}
 		rows = append(rows, row)
 	}
+	sortKey, sortDir := leaderboardSort(r)
+	sortLeaderboardRows(rows, sortKey, sortDir)
 
 	data := leaderboardData{
 		layoutData:     a.newLayout(r, club.Name, clubPath(&club, ""), &club),
@@ -111,6 +118,79 @@ func (a *App) handleLeaderboard(w http.ResponseWriter, r *http.Request, club db.
 		Selected:       ctx.Selected,
 		SeasonID:       ctx.SeasonID,
 		SeasonExplicit: ctx.SeasonExplicit,
+		SortKey:        sortKey,
+		SortDir:        sortDir,
+		SortLinks:      leaderboardSortLinks(r, clubPath(&club, ""), sortKey, sortDir),
 	}
 	renderTemplate(w, "layout", data, "templates/layout.html", "templates/leaderboard.html")
+}
+
+func leaderboardSort(r *http.Request) (string, string) {
+	key := r.URL.Query().Get("sort")
+	switch key {
+	case "games", "wins", "losses", "meldings", "points", "pps":
+	default:
+		key = "points"
+	}
+	dir := r.URL.Query().Get("dir")
+	if dir != "asc" {
+		dir = "desc"
+	}
+	return key, dir
+}
+
+func sortLeaderboardRows(rows []leaderboardRow, key, dir string) {
+	sort.SliceStable(rows, func(i, j int) bool {
+		left, right := leaderboardSortValue(rows[i], key), leaderboardSortValue(rows[j], key)
+		if left != right {
+			if dir == "asc" {
+				return left < right
+			}
+			return left > right
+		}
+		if rows[i].Rank != rows[j].Rank {
+			return rows[i].Rank < rows[j].Rank
+		}
+		return rows[i].Player.Name < rows[j].Player.Name
+	})
+}
+
+func leaderboardSortValue(row leaderboardRow, key string) float64 {
+	switch key {
+	case "games":
+		return float64(row.Games)
+	case "wins":
+		return float64(row.Wins)
+	case "losses":
+		return float64(row.Losses)
+	case "meldings":
+		return float64(row.Meldings)
+	case "pps":
+		return row.PPS
+	default:
+		return float64(row.Points)
+	}
+}
+
+func leaderboardSortLinks(r *http.Request, path, currentKey, currentDir string) map[string]string {
+	out := make(map[string]string, 6)
+	for _, key := range []string{"games", "wins", "losses", "meldings", "points", "pps"} {
+		q := cloneQuery(r.URL.Query())
+		q.Set("sort", key)
+		if key == currentKey && currentDir == "desc" {
+			q.Set("dir", "asc")
+		} else {
+			q.Set("dir", "desc")
+		}
+		out[key] = path + "?" + q.Encode()
+	}
+	return out
+}
+
+func cloneQuery(in url.Values) url.Values {
+	out := make(url.Values, len(in))
+	for k, values := range in {
+		out[k] = append([]string(nil), values...)
+	}
+	return out
 }

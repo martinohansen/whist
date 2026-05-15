@@ -3,12 +3,13 @@
   {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
   {{if .Success}}<p class="success">{{.Success}}</p>{{end}}
 
-  <form action="/c/{{.Club.ID}}/settings/save" method="post" class="stack">
+  <form action="/c/{{.Club.ID}}/settings/save" method="post" class="stack settings-form">
+    {{if .SeasonQuery}}<input type="hidden" name="season" value="{{.SeasonID}}" />{{end}}
 
     <h2 class="stat-label first">Klub</h2>
+    <p class="muted">Skift klubbens emoji og navn.</p>
     <div class="club-identity">
       <label class="stack">
-        <span class="stat-label">Emoji</span>
         <input type="hidden" name="emoji" id="emoji-input" value="{{.Club.Emoji}}" />
         <button type="button" class="emoji-preview emoji-picker" id="emoji-picker"
                 title="Klik for at vælge en anden emoji">
@@ -16,13 +17,12 @@
         </button>
       </label>
       <label class="stack club-name-field">
-        <span class="stat-label">Navn</span>
         <input type="text" name="name" id="club-name" value="{{.Club.Name}}" required />
       </label>
     </div>
 
     <h2 class="stat-label">Regler</h2>
-    <p class="muted">Skriv klubbens regler. Almindelig tekst — vises som-er.</p>
+    <p class="muted">Skriv klubbens regler og vedtægter her.</p>
     <textarea name="rules" rows="8" class="rules-input"
               placeholder="fx Vi spiller efter aftalte regler …">{{.Club.Rules}}</textarea>
 
@@ -50,14 +50,17 @@
           <th>Type</th>
           <th class="num">Stik</th>
           <th class="num">Point</th>
-          <th class="num"></th>
+          <th class="row-remove-col"></th>
         </tr>
       </thead>
       <tbody id="meldings-body">
         {{range .Meldings}}
         <tr>
           <td class="row-drag-col"><button type="button" class="ghost drag-handle" draggable="true" aria-label="Træk melding">↕</button></td>
-          <td><input type="text" name="melding_name" value="{{.Name}}" required /></td>
+          <td>
+            <input type="hidden" name="melding_id" value="{{.ID}}" />
+            <input type="text" name="melding_name" value="{{.Name}}" required />
+          </td>
           <td>
             <select name="melding_type">
               <option value="normal" {{if ne .Type "nolo"}}selected{{end}}>Normal</option>
@@ -66,13 +69,13 @@
           </td>
           <td class="num"><input type="number" name="melding_bid" value="{{.Bid}}" min="0" max="13" required /></td>
           <td class="num"><input type="number" name="melding_points" value="{{.Points}}" required /></td>
-          <td class="num"><button type="button" class="ghost row-remove">−</button></td>
+          <td class="row-remove-col"><button type="button" class="ghost row-remove">−</button></td>
         </tr>
         {{end}}
       </tbody>
     </table>
     <div class="actions">
-      <button type="button" class="ghost" id="melding-add">+ Tilføj melding</button>
+      <button type="button" class="ghost settings-add" id="melding-add">+ Tilføj melding</button>
     </div>
 
     <h2 class="stat-label">Spillere</h2>
@@ -95,7 +98,7 @@
       {{end}}
     </div>
     <div class="actions">
-      <button type="button" class="ghost" id="player-add">+ Tilføj spiller</button>
+      <button type="button" class="ghost settings-add" id="player-add">+ Tilføj spiller</button>
     </div>
 
     <h2 class="stat-label">Perioder</h2>
@@ -121,7 +124,7 @@
       {{end}}
     </div>
     <div class="actions">
-      <button type="button" class="ghost" id="season-add">+ Tilføj periode</button>
+      <button type="button" class="ghost settings-add" id="season-add">+ Tilføj periode</button>
     </div>
 
     <h2 class="stat-label">Synlighed</h2>
@@ -131,6 +134,10 @@
       via direkte link til klubben.
     </p>
     <div class="visibility-row">
+      <input type="password" name="password" id="password-input"
+             class="password-input"
+             placeholder="Kodeord"
+             {{if not .PasswordEnabled}}hidden{{end}} />
       <div class="visibility-toggle" role="group" aria-label="Synlighed">
         <input type="radio" name="visibility" id="vis-public" value="public"
                {{if .PasswordEnabled}}checked{{end}} />
@@ -139,10 +146,6 @@
                {{if not .PasswordEnabled}}checked{{end}} />
         <label for="vis-private">Privat</label>
       </div>
-      <input type="password" name="password" id="password-input"
-             class="password-input"
-             placeholder="Kodeord"
-             {{if not .PasswordEnabled}}hidden{{end}} />
     </div>
 
     <div class="actions">
@@ -158,11 +161,11 @@
     var tr = document.createElement("tr");
     tr.innerHTML =
       '<td class="row-drag-col"><button type="button" class="ghost drag-handle" draggable="true" aria-label="Træk melding">↕</button></td>' +
-      '<td><input type="text" name="melding_name" required /></td>' +
+      '<td><input type="hidden" name="melding_id" value="" /><input type="text" name="melding_name" required /></td>' +
       '<td><select name="melding_type"><option value="normal" selected>Normal</option><option value="nolo">Nolo</option></select></td>' +
       '<td class="num"><input type="number" name="melding_bid" min="0" max="13" value="7" required /></td>' +
       '<td class="num"><input type="number" name="melding_points" value="1" required /></td>' +
-      '<td class="num"><button type="button" class="ghost row-remove">−</button></td>';
+      '<td class="row-remove-col"><button type="button" class="ghost row-remove">−</button></td>';
     body.appendChild(tr);
   });
   body.addEventListener("click", function (e) {
@@ -196,23 +199,23 @@
     body.insertBefore(draggedMeldingRow, after ? row.nextSibling : row);
   });
 
-  // Emoji picker: cycle through the supported pool. The picker button cycles
-  // its sibling hidden input + own text. Works for the club emoji picker and
-  // per-player rows alike.
+  // Emoji picker: pick a random supported emoji that differs from the current
+  // value. Works for the club emoji picker and per-player rows alike.
   var emojiPool = {{json .EmojiPool}};
   function wireEmojiPicker(btn, input) {
     if (!btn || !input || !emojiPool.length) return;
-    var idx = emojiPool.indexOf(input.value);
-    if (idx < 0) idx = 0;
-    function set(i) {
-      idx = ((i % emojiPool.length) + emojiPool.length) % emojiPool.length;
-      input.value = emojiPool[idx];
-      btn.textContent = emojiPool[idx];
+    function pick() {
+      if (emojiPool.length === 1) return emojiPool[0];
+      var emoji = input.value;
+      while (emoji === input.value) {
+        emoji = emojiPool[Math.floor(Math.random() * emojiPool.length)];
+      }
+      return emoji;
     }
-    btn.addEventListener("click", function () { set(idx + 1); });
-    btn.addEventListener("contextmenu", function (e) {
-      e.preventDefault();
-      set(idx - 1);
+    btn.addEventListener("click", function () {
+      var emoji = pick();
+      input.value = emoji;
+      btn.textContent = emoji;
     });
   }
   wireEmojiPicker(document.getElementById("emoji-picker"),

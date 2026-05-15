@@ -275,6 +275,11 @@ a:hover {
   padding: 2px;
 }
 
+.games-table td a {
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
 .note-indicator {
   font-size: 0.9em;
   opacity: 0.7;
@@ -513,6 +518,10 @@ button.danger {
   align-items: flex-end;
 }
 
+.settings-form > h2.stat-label:first-of-type {
+  margin-top: 0;
+}
+
 .club-identity .club-name-field {
   flex: 1;
   min-width: 0;
@@ -553,6 +562,7 @@ button.emoji-picker:hover {
   display: flex;
   gap: var(--spacing-md);
   align-items: stretch;
+  justify-content: flex-end;
   flex-wrap: wrap;
 }
 
@@ -588,8 +598,8 @@ button.emoji-picker:hover {
 }
 
 .visibility-toggle input[type="radio"]:checked + label {
-  background: var(--accent);
-  color: #fff;
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .password-input {
@@ -616,10 +626,13 @@ button.emoji-picker:hover {
 
 .meldings-table {
   table-layout: fixed;
+  width: 100%;
+  margin-left: 0;
+  margin-right: 0;
 }
 
 .meldings-table col.col-drag {
-  width: 44px;
+  width: 46px;
 }
 
 .meldings-table col.col-name {
@@ -635,7 +648,7 @@ button.emoji-picker:hover {
 }
 
 .meldings-table col.col-remove {
-  width: 54px;
+  width: 52px;
 }
 
 .meldings-table input[type="text"],
@@ -645,6 +658,7 @@ button.emoji-picker:hover {
   padding: 8px 10px;
   font-size: 15px;
   min-width: 0;
+  height: 42px;
 }
 
 /* Give the numeric columns enough room for two digits + spinners. */
@@ -656,18 +670,23 @@ button.emoji-picker:hover {
   text-align: right;
 }
 
-.meldings-table .row-drag-col {
+.meldings-table .row-drag-col,
+.meldings-table .row-remove-col {
   text-align: center;
-  padding-left: var(--spacing-xs);
-  padding-right: var(--spacing-xs);
 }
 
 .drag-handle {
-  width: 32px;
-  height: 32px;
+  width: 42px;
+  height: 42px;
   padding: 0;
   cursor: grab;
   line-height: 1;
+}
+
+.meldings-table .row-remove {
+  width: 48px;
+  height: 42px;
+  padding: 0;
 }
 
 .drag-handle:active {
@@ -678,19 +697,19 @@ button.emoji-picker:hover {
   opacity: 0.55;
 }
 
-/* Uniform 16px gaps between every column (8px padding on each side). */
+/* Keep the same 8px rhythm as the player rows below. */
 .meldings-table th,
 .meldings-table td {
-  padding-left: var(--spacing-sm);
-  padding-right: var(--spacing-sm);
+  padding-left: var(--spacing-xs);
+  padding-right: var(--spacing-xs);
 }
 .meldings-table th:first-child,
 .meldings-table td:first-child {
-  padding-left: calc(var(--spacing-lg) + 10px);
+  padding-left: 0;
 }
 .meldings-table th:last-child,
 .meldings-table td:last-child {
-  padding-right: calc(var(--spacing-lg) + 10px);
+  padding-right: 0;
 }
 
 /* GAME HEADER */
@@ -700,6 +719,52 @@ button.emoji-picker:hover {
   justify-content: space-between;
   gap: var(--spacing-lg);
   margin-bottom: 20px;
+}
+
+.game-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: var(--spacing-md);
+}
+
+.badge-nav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 75px;
+  justify-content: center;
+}
+
+.game-nav-arrow {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  color: inherit;
+  transition: opacity 0.15s ease;
+  padding: 0 2px;
+  line-height: 0.8;
+  margin-top: -2px;
+}
+
+.game-nav-arrow:hover {
+  opacity: 0.6;
+}
+
+.game-nav-disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.game-id-display {
+  min-width: 50px;
+  text-align: center;
+  line-height: 1.5;
+}
+
+.game-edit-form {
+  margin: 0;
 }
 
 .game-header h1 {
@@ -823,6 +888,10 @@ button.emoji-picker:hover {
   width: 42px;
 }
 
+.settings-add {
+  width: 148px;
+}
+
 /* SEASONS */
 .season-list {
   display: flex;
@@ -841,6 +910,12 @@ button.emoji-picker:hover {
 .season-row input[type="date"] {
   width: 100%;
   min-width: 0;
+}
+
+.season-row .row-remove {
+  width: 48px;
+  height: 42px;
+  padding: 0;
 }
 
 

@@ -47,7 +47,7 @@ func (a *App) handleDeletePlayer(w http.ResponseWriter, r *http.Request, club db
 		a.renderSettings(w, r, club, "Kunne ikke slette spilleren.", "")
 		return
 	}
-	http.Redirect(w, r, clubPath(&club, "settings"), http.StatusSeeOther)
+	http.Redirect(w, r, clubPathForRequest(r, &club, "settings"), http.StatusSeeOther)
 }
 
 // redirectAfterPlayerChange picks the most useful page to land on after

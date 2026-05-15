@@ -26,6 +26,7 @@ type Store interface {
 	CreateClub(name string) (db.Club, error)
 	GetClub(id string) (db.Club, error)
 	UpdateClub(id, name, emoji, rules string) error
+	UpdateSettings(clubID string, update db.SettingsUpdate) error
 	VerifyClubPassword(id, password string) (bool, error)
 	ClubPasswordHash(id string) (string, error)
 	SetClubPassword(id, password string) error
@@ -58,6 +59,7 @@ type Store interface {
 	AddGame(clubID string, playedAt time.Time, m db.Melding, scores []game.PlayerEntry, note string) (int, error)
 	ListGames(clubID string) ([]db.Game, error)
 	GetGame(clubID string, id int) (db.Game, error)
+	UpdateGame(clubID string, id int, playedAt time.Time, m db.Melding, scores []game.PlayerEntry, note string) error
 	DeleteGame(clubID string, id int) error
 
 	// Drafts (paper-import flow)
@@ -273,6 +275,24 @@ func (a *App) handleClubRoute(w http.ResponseWriter, r *http.Request) {
 			a.handleDeleteGame(w, r, club, gameID)
 			return
 		}
+		if rest, ok := strings.CutSuffix(idStr, "/edit"); ok {
+			gameID, err := strconv.Atoi(rest)
+			if err != nil {
+				http.NotFound(w, r)
+				return
+			}
+			a.handleEditGame(w, r, club, gameID)
+			return
+		}
+		if rest, ok := strings.CutSuffix(idStr, "/update"); ok {
+			gameID, err := strconv.Atoi(rest)
+			if err != nil {
+				http.NotFound(w, r)
+				return
+			}
+			a.handleUpdateGame(w, r, club, gameID)
+			return
+		}
 		gameID, err := strconv.Atoi(idStr)
 		if err != nil {
 			http.NotFound(w, r)
@@ -314,6 +334,7 @@ type layoutData struct {
 	Seasons        []db.Season
 	SeasonID       int
 	SeasonExplicit bool
+	SeasonQuery    string
 }
 
 func (a *App) newLayout(r *http.Request, title, path string, club *db.Club) layoutData {
@@ -331,6 +352,7 @@ func (a *App) newLayout(r *http.Request, title, path string, club *db.Club) layo
 			data.Seasons = ctx.Seasons
 			data.SeasonID = ctx.SeasonID
 			data.SeasonExplicit = ctx.SeasonExplicit
+			data.SeasonQuery = selectedSeasonQuery(ctx)
 		}
 	}
 	return data
@@ -386,6 +408,10 @@ func clubPath(c *db.Club, sub string) string {
 		return "/c/" + c.ID
 	}
 	return "/c/" + c.ID + "/" + strings.TrimPrefix(sub, "/")
+}
+
+func clubPathForRequest(r *http.Request, c *db.Club, sub string) string {
+	return clubPath(c, sub) + requestSeasonQuery(r)
 }
 
 func parseIDs(values []string) ([]int, error) {
