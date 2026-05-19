@@ -70,7 +70,7 @@
 
         <div class="score-summary">
           <span>Beregnet score:</span>
-          <span class="score-summary-text muted">vælg melding og stik</span>
+          <span class="score-summary-text muted">{{if .ScoreSummary}}{{.ScoreSummary}}{{else}}vælg melding og stik{{end}}</span>
         </div>
 
         <ul class="draft-issues" {{if .Valid}}hidden{{end}}>
@@ -177,6 +177,8 @@
     function activeCards() { return cards.filter(function (c) { return getRole(c) !== ""; }); }
     {{template "game-entry-shared-script" .}}
 
+    const summary = draftCard.querySelector(".score-summary-text");
+
     function applyIssues(issues) {
       issuesEl.innerHTML = "";
       if (issues.length === 0) {
@@ -191,62 +193,12 @@
         issuesEl.removeAttribute("hidden");
         draftCard.classList.add("draft-card--invalid");
       }
-      updateSummary();
       refreshApproveBtn();
     }
 
-    const summary = draftCard.querySelector(".score-summary-text");
-    function updateSummary() {
+    function applyPreview(summaryText) {
       if (!summary) return;
-      const opt = meldingSelect.selectedOptions[0];
-      if (!opt || opt.value === "0") { summary.textContent = "vælg melding og stik"; return; }
-      const bid = parseInt(opt.dataset.bid, 10);
-      const pts = parseInt(opt.dataset.points, 10);
-      const active = activeCards();
-      const counts = roleCounts();
-      if (isNolo()) {
-        const meldCount = counts.melder + counts.makker;
-        const modCount = counts.modspil;
-        if (active.length !== 4 || counts.melder !== 1 || meldCount + modCount !== 4) {
-          summary.textContent = "vælg melder og tre andre spillere"; return;
-        }
-        let sumPerOpp = 0;
-        const perCard = new Map();
-        active.forEach(function (c) {
-          const r = getRole(c);
-          if (r !== "melder" && r !== "makker") return;
-          const diff = bid - getTricks(c);
-          const p = diff >= 0 ? pts * (diff + 1) : pts * diff;
-          sumPerOpp += p;
-          perCard.set(c, modCount * p);
-        });
-        const modScore = -sumPerOpp;
-        const parts = [];
-        active.forEach(function (c) {
-          const r = getRole(c);
-          const sc = (r === "modspil") ? modScore : perCard.get(c);
-          parts.push(playerEmoji(c) + " " + fmtScore(sc));
-        });
-        summary.textContent = parts.join(" · ");
-        return;
-      }
-      if (active.length !== 4 || counts.melder !== 1 || counts.makker !== 1 || counts.modspil !== 2) {
-        summary.textContent = "vælg melder, makker og to modspillere"; return;
-      }
-      let meldTricks = 0;
-      active.forEach(function (c) {
-        const r = getRole(c);
-        if (r === "melder" || r === "makker") meldTricks += getTricks(c);
-      });
-      const diff = meldTricks - bid;
-      const meldScore = diff >= 0 ? pts * (diff + 1) : pts * diff;
-      const parts = [];
-      active.forEach(function (c) {
-        const r = getRole(c);
-        const sc = (r === "melder" || r === "makker") ? meldScore : -meldScore;
-        parts.push(playerEmoji(c) + " " + fmtScore(sc));
-      });
-      summary.textContent = parts.join(" · ");
+      summary.textContent = summaryText || "vælg melding og stik";
     }
 
     function buildFormData() {
@@ -267,7 +219,6 @@
     let saveTimer = null;
     let savedTimer = null;
     function scheduleSave() {
-      updateSummary();
       draftCard.dataset.saving = "true";
       refreshApproveBtn();
       if (saveTimer) clearTimeout(saveTimer);
@@ -283,6 +234,7 @@
         }).then(function (data) {
           delete draftCard.dataset.saving;
           applyIssues(data.issues || []);
+          applyPreview(data.summary || "");
           if (savedEl) {
             savedEl.removeAttribute("hidden");
             if (savedTimer) clearTimeout(savedTimer);
@@ -356,8 +308,6 @@
         });
       });
     }
-
-    updateSummary();
     return { setDate: function (v) { dateInput.value = v; scheduleSave(); } };
   }
 

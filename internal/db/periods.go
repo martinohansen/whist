@@ -157,25 +157,30 @@ func nullableDate(d string) any {
 	return d
 }
 
+type seasonOverlapQueryer interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+}
+
 // checkSeasonOverlap returns ErrSeasonOverlap if [start,end] overlaps any
 // other season for the club (excluding the given id, if non-zero).
 func (s *Store) checkSeasonOverlap(clubID string, excludeID int, start, end string) error {
+	return checkSeasonOverlapQuery(s.db, clubID, excludeID, start, end)
+}
+
+func checkSeasonOverlapQuery(q seasonOverlapQueryer, clubID string, excludeID int, start, end string) error {
 	start = strings.TrimSpace(start)
 	end = strings.TrimSpace(end)
 	if start == "" {
 		return errors.New("start date required")
 	}
-	// Build the WHERE-overlap condition in SQL. Two date ranges [a1,a2]
-	// and [b1,b2] (where a2/b2 may be NULL meaning open-ended) overlap
-	// iff a1 <= b2 AND b1 <= a2.
 	var rows *sql.Rows
 	var err error
 	if end == "" {
-		rows, err = s.db.Query(`
+		rows, err = q.Query(`
 			SELECT id FROM seasons WHERE club_id = ? AND id != ?
 			  AND (end_date IS NULL OR end_date >= ?)`, clubID, excludeID, start)
 	} else {
-		rows, err = s.db.Query(`
+		rows, err = q.Query(`
 			SELECT id FROM seasons WHERE club_id = ? AND id != ?
 			  AND start_date <= ?
 			  AND (end_date IS NULL OR end_date >= ?)`, clubID, excludeID, end, start)

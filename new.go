@@ -106,7 +106,7 @@ func (a *App) handleSaveGame(w http.ResponseWriter, r *http.Request, club db.Clu
 	http.Redirect(w, r, clubPathForRequest(r, &club, "games"), http.StatusSeeOther)
 }
 
-func (a *App) parseGameForm(r *http.Request, club db.Club) (parsedGameForm, string, error) {
+func (a *App) parseGameEntries(r *http.Request, club db.Club) (parsedGameForm, string, error) {
 	meldingID, err := strconv.Atoi(strings.TrimSpace(r.FormValue("melding_id")))
 	if err != nil {
 		return parsedGameForm{}, "Vælg en melding.", nil
@@ -159,17 +159,22 @@ func (a *App) parseGameForm(r *http.Request, club db.Club) (parsedGameForm, stri
 	if msg := gameEntryMessage(melding.Type, game.ValidateEntries(melding.Type, inputs)); msg != "" {
 		return parsedGameForm{}, msg, nil
 	}
+	return parsedGameForm{Melding: melding, Entries: inputs}, "", nil
+}
+
+func (a *App) parseGameForm(r *http.Request, club db.Club) (parsedGameForm, string, error) {
+	form, msg, err := a.parseGameEntries(r, club)
+	if err != nil || msg != "" {
+		return form, msg, err
+	}
 
 	playedAt, msg := parsePlayedAt(r.FormValue("played_at"))
 	if msg != "" {
 		return parsedGameForm{}, msg, nil
 	}
-	return parsedGameForm{
-		Melding:  melding,
-		Entries:  inputs,
-		PlayedAt: playedAt,
-		Note:     strings.TrimSpace(r.FormValue("note")),
-	}, "", nil
+	form.PlayedAt = playedAt
+	form.Note = strings.TrimSpace(r.FormValue("note"))
+	return form, "", nil
 }
 
 func (a *App) loadGameFormPlayers(clubID string, scores []db.PlayerScore) ([]gameFormPlayer, error) {

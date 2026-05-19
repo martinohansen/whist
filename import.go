@@ -38,9 +38,10 @@ type importReviewData struct {
 // draftView is a draft enriched with derived fields for the template.
 type draftView struct {
 	db.Draft
-	PlayedAtStr string // ISO date for <input type=date>
-	Valid       bool
-	Issues      []string
+	PlayedAtStr  string // ISO date for <input type=date>
+	Valid        bool
+	ScoreSummary string
+	Issues       []string
 }
 
 func (a *App) handleAnalyzeImport(w http.ResponseWriter, r *http.Request, club db.Club) {
@@ -162,6 +163,11 @@ func (a *App) renderReview(w http.ResponseWriter, r *http.Request, club db.Club,
 		}
 		dv.Issues = validateDraft(d, meldingByID)
 		dv.Valid = len(dv.Issues) == 0
+		if m, ok := meldingByID[d.MeldingID]; ok {
+			dv.ScoreSummary = draftSummary(d, m, players)
+		} else {
+			dv.ScoreSummary = "Vælg en melding"
+		}
 		views = append(views, dv)
 	}
 
@@ -246,13 +252,24 @@ func (a *App) handleSaveDraft(w http.ResponseWriter, r *http.Request, club db.Cl
 			meldingByID[m.ID] = m
 		}
 		issues := validateDraft(draft, meldingByID)
+		summary := "Vælg en melding"
+		if m, ok := meldingByID[draft.MeldingID]; ok {
+			players, err := a.store.ListPlayers(club.ID)
+			if err != nil {
+				http.Error(w, "db error", http.StatusInternalServerError)
+				return
+			}
+			summary = draftSummary(draft, m, players)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(struct {
-			Valid  bool     `json:"valid"`
-			Issues []string `json:"issues"`
+			Valid   bool     `json:"valid"`
+			Issues  []string `json:"issues"`
+			Summary string   `json:"summary"`
 		}{
-			Valid:  len(issues) == 0,
-			Issues: issues,
+			Valid:   len(issues) == 0,
+			Issues:  issues,
+			Summary: summary,
 		}); err != nil {
 			slog.Error("encode draft save response", "err", err)
 		}

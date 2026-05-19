@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -190,28 +191,41 @@ func (s *Store) ListSettlements(clubID string) ([]Settlement, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	for i := range settlements {
-		rows, err := s.db.Query(`
-			SELECT player_id, player_name, player_emoji, points, amount_cents
-			FROM settlement_rows
-			WHERE settlement_id = ?
-			ORDER BY points DESC, player_name COLLATE NOCASE, player_id`, settlements[i].ID)
-		if err != nil {
-			return nil, err
-		}
-		for rows.Next() {
-			var row SettlementRow
-			if err := rows.Scan(&row.PlayerID, &row.PlayerName, &row.PlayerEmoji, &row.Points, &row.AmountCents); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			settlements[i].Rows = append(settlements[i].Rows, row)
-		}
-		if err := rows.Err(); err != nil {
+	if len(settlements) == 0 {
+		return settlements, nil
+	}
+	placeholders := make([]string, len(settlements))
+	args := make([]any, len(settlements))
+	for i, settlement := range settlements {
+		placeholders[i] = "?"
+		args[i] = settlement.ID
+	}
+	rowQuery := `
+		SELECT settlement_id, player_id, player_name, player_emoji, points, amount_cents
+		FROM settlement_rows
+		WHERE settlement_id IN (` + strings.Join(placeholders, ",") + `)
+		ORDER BY settlement_id, points DESC, player_name COLLATE NOCASE, player_id`
+	rows, err = s.db.Query(rowQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+	rowsBySettlement := make(map[int][]SettlementRow, len(settlements))
+	for rows.Next() {
+		var settlementID int
+		var row SettlementRow
+		if err := rows.Scan(&settlementID, &row.PlayerID, &row.PlayerName, &row.PlayerEmoji, &row.Points, &row.AmountCents); err != nil {
 			rows.Close()
 			return nil, err
 		}
+		rowsBySettlement[settlementID] = append(rowsBySettlement[settlementID], row)
+	}
+	if err := rows.Err(); err != nil {
 		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	for i := range settlements {
+		settlements[i].Rows = rowsBySettlement[settlements[i].ID]
 	}
 	return settlements, nil
 }

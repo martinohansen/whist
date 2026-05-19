@@ -111,7 +111,11 @@
   const form = document.getElementById("new-game-form");
   const meldingSelect = document.getElementById("melding-select");
   const summary = document.getElementById("score-summary-text");
+  const previewURL = "/c/{{ .Club.ID | js }}/games/preview";
+  const seasonInput = form.querySelector('input[name="season"]');
   const cards = Array.from(document.querySelectorAll(".player-card"));
+  let previewTimer = null;
+  let previewSeq = 0;
 
   function isNolo() {
     const opt = meldingSelect.selectedOptions[0];
@@ -232,59 +236,39 @@
     normalizeTotal();
   }
 
-  function updateSummary() {
-    const opt = meldingSelect.selectedOptions[0];
-    if (!opt) return;
-    const bid = parseInt(opt.dataset.bid, 10);
-    const pts = parseInt(opt.dataset.points, 10);
-    const active = activeCards();
-    const counts = roleCounts();
-    if (isNolo()) {
-      const meldCount = counts.melder + counts.makker;
-      const modCount = counts.modspil;
-      if (active.length !== 4 || counts.melder !== 1 || meldCount + modCount !== 4) {
-        summary.textContent = "vælg melder og tre andre spillere";
-        return;
-      }
-      // Each meld-side player has an independent bet against modspil.
-      let sumPerOpp = 0;
-      const perCard = new Map();
-      active.forEach(function (c) {
-        const r = getRole(c);
-        if (r !== "melder" && r !== "makker") return;
-        const diff = bid - getTricks(c);
-        const p = diff >= 0 ? pts * (diff + 1) : pts * diff;
-        sumPerOpp += p;
-        perCard.set(c, modCount * p);
-      });
-      const modScore = -sumPerOpp;
-      const parts = [];
-      active.forEach(function (c) {
-        const r = getRole(c);
-        const sc = (r === "modspil") ? modScore : perCard.get(c);
-        parts.push(playerEmoji(c) + " " + fmtScore(sc));
-      });
-      summary.textContent = parts.join(" · ");
-      return;
+  function buildPreviewFormData() {
+    const fd = new FormData();
+    if (seasonInput) {
+      fd.set("season", seasonInput.value || "");
     }
-    if (active.length !== 4 || counts.melder !== 1 || counts.makker !== 1 || counts.modspil !== 2) {
-      summary.textContent = "vælg melder, makker og to modspillere";
-      return;
-    }
-    let meldTricks = 0;
-    active.forEach(function (c) {
-      const r = getRole(c);
-      if (r === "melder" || r === "makker") meldTricks += getTricks(c);
+    fd.set("played_at", form.querySelector('input[name="played_at"]').value || "");
+    fd.set("melding_id", meldingSelect.value || "0");
+    fd.set("note", form.querySelector('input[name="note"]').value || "");
+    activeCards().forEach(function (card) {
+      fd.append("player_id", card.dataset.pid);
+      fd.set("role_" + card.dataset.pid, getRole(card));
+      fd.set("tricks_" + card.dataset.pid, String(getTricks(card)));
     });
-    const diff = meldTricks - bid;
-    const meldScore = diff >= 0 ? pts * (diff + 1) : pts * diff;
-    const parts = [];
-    active.forEach(function (c) {
-      const r = getRole(c);
-      const sc = (r === "melder" || r === "makker") ? meldScore : -meldScore;
-      parts.push(playerEmoji(c) + " " + fmtScore(sc));
-    });
-    summary.textContent = parts.join(" · ");
+    return fd;
+  }
+
+  function schedulePreview() {
+    if (!summary) return;
+    if (previewTimer) clearTimeout(previewTimer);
+    previewTimer = setTimeout(function () {
+      const seq = ++previewSeq;
+      fetch(previewURL, {
+        method: "POST",
+        body: buildPreviewFormData(),
+        headers: { "Accept": "application/json" },
+        credentials: "same-origin",
+      }).then(function (res) {
+        return res.json();
+      }).then(function (data) {
+        if (seq !== previewSeq) return;
+        summary.textContent = data.summary || data.message || "vælg melding og stik";
+      }).catch(function () {});
+    }, 180);
   }
 
   cards.forEach(function (card) {
@@ -306,20 +290,20 @@
         setTricksVal(card, 0);
       }
       applyDefaultsForMelding();
-      updateSummary();
+      schedulePreview();
     });
 
     const tricksEl = card.querySelector(".player-tricks");
     tricksEl.addEventListener("click", function () {
       if (!getRole(card)) return;
       adjustTricks(card, 1);
-      updateSummary();
+      schedulePreview();
     });
     tricksEl.addEventListener("contextmenu", function (e) {
       e.preventDefault();
       if (!getRole(card)) return;
       adjustTricks(card, -1);
-      updateSummary();
+      schedulePreview();
     });
   });
 
@@ -338,7 +322,7 @@
     }
     refreshRoleBadges();
     applyDefaultsForMelding();
-    updateSummary();
+    schedulePreview();
   });
 
   form.addEventListener("submit", function () {
@@ -380,6 +364,6 @@
     }
   });
 
-  updateSummary();
+  schedulePreview();
 })();
 {{end}}

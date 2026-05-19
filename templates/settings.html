@@ -333,123 +333,15 @@
     });
   });
 
-  // Settlement example: recompute live when the club defaults change.
-  var settlementRows = {{json .SettlementExampleRows}};
+  // Settlement example is server-rendered and refreshed from the server.
+  var settingsForm = document.querySelector(".settings-form");
   var settlementTypeInput = document.getElementById("default-settlement-type");
   var settlementAmountInput = document.getElementById("default-settlement-amount");
   var commonDebtInput = document.getElementById("common-debt-equal-percent");
-  function formatMoney(cents) {
-    var sign = cents < 0 ? "-" : "";
-    cents = Math.abs(cents);
-    return sign + Math.floor(cents / 100) + "," + String(cents % 100).padStart(2, "0") + " kr.";
-  }
-  function allocate(total, weightedRows) {
-    var sumWeights = weightedRows.reduce(function (sum, row) { return sum + row.weight; }, 0);
-    var out = {};
-    if (sumWeights === 0) return out;
-    var allocated = 0;
-    var remainders = weightedRows.map(function (row, index) {
-      var product = total * row.weight;
-      var cents = Math.floor(product / sumWeights);
-      out[row.PlayerID] = cents;
-      allocated += cents;
-      return {
-        PlayerID: row.PlayerID,
-        order: index,
-        remainder: product % sumWeights,
-      };
-    });
-    remainders.sort(function (a, b) {
-      if (a.remainder !== b.remainder) return b.remainder - a.remainder;
-      return a.order - b.order;
-    });
-    for (var i = 0; i < total - allocated; i++) {
-      out[remainders[i].PlayerID]++;
-    }
-    return out;
-  }
-  function parseAmount(value) {
-    value = (value || "").trim().replace(".", ",");
-    var parts = value.split(",");
-    if (!parts[0] || parts.length > 2) return 0;
-    var kroner = parseInt(parts[0], 10);
-    if (isNaN(kroner) || kroner < 0) return 0;
-    var ore = 0;
-    if (parts.length === 2) {
-      if (!parts[1] || parts[1].length > 2) return 0;
-      var rawOre = parts[1].padEnd(2, "0");
-      ore = parseInt(rawOre, 10);
-      if (isNaN(ore)) return 0;
-    }
-    return kroner * 100 + ore;
-  }
-  function commonDebtAmounts(total, percent) {
-    var percent = parseInt(commonDebtInput.value, 10);
-    if (isNaN(percent)) percent = 0;
-    percent = Math.max(0, Math.min(100, percent));
-    var equalTotal = Math.floor(total * percent / 100);
-    var gapTotal = total - equalTotal;
-    var participants = settlementRows.map(function (row) {
-      return { PlayerID: row.PlayerID, weight: 1 };
-    });
-    var amounts = allocate(equalTotal, participants);
-    var best = settlementRows.reduce(function (max, row) {
-      return Math.max(max, row.Points);
-    }, settlementRows[0].Points);
-    var gaps = settlementRows.map(function (row) {
-      return { PlayerID: row.PlayerID, weight: best - row.Points };
-    });
-    var totalGap = gaps.reduce(function (sum, row) { return sum + row.weight; }, 0);
-    var gapAmounts = allocate(gapTotal, totalGap === 0 ? participants : gaps);
-    settlementRows.forEach(function (row) {
-      amounts[row.PlayerID] = -((amounts[row.PlayerID] || 0) + (gapAmounts[row.PlayerID] || 0));
-    });
-    return amounts;
-  }
-  function pointSettlementAmounts(total) {
-    var positives = [];
-    var negatives = [];
-    settlementRows.forEach(function (row) {
-      if (row.Points > 0) positives.push({ PlayerID: row.PlayerID, weight: row.Points });
-      if (row.Points < 0) negatives.push({ PlayerID: row.PlayerID, weight: -row.Points });
-    });
-    if (!positives.length || !negatives.length) return {};
-    var out = {};
-    var positiveAmounts = allocate(total, positives);
-    var negativeAmounts = allocate(total, negatives);
-    settlementRows.forEach(function (row) {
-      if (positiveAmounts[row.PlayerID]) out[row.PlayerID] = positiveAmounts[row.PlayerID];
-      if (negativeAmounts[row.PlayerID]) out[row.PlayerID] = -negativeAmounts[row.PlayerID];
-    });
-    return out;
-  }
-  function updateSettlementExample() {
-    if (!settlementTypeInput) return;
-    var type = settlementTypeInput.value;
-    updateCommonDebtFieldState(type);
-    if (!settlementRows.length || !settlementAmountInput) return;
-    var total = parseAmount(settlementAmountInput.value);
-    var amounts = type === "common_debt" ? commonDebtAmounts(total) : pointSettlementAmounts(total);
-    var label = document.getElementById("settlement-example-label");
-    if (label) {
-      label.textContent = "Eksempel med nuværende stilling og " +
-        (type === "common_debt" ? "fælles gæld" : "pointafregning") +
-        " på " + formatMoney(total) + ".";
-    }
-    settlementRows.forEach(function (row) {
-      var cell = document.querySelector('[data-example-player="' + row.PlayerID + '"]');
-      if (!cell) return;
-      if (Object.prototype.hasOwnProperty.call(amounts, row.PlayerID)) {
-        cell.textContent = formatMoney(amounts[row.PlayerID]);
-      } else {
-        cell.textContent = "—";
-      }
-    });
-  }
-  [settlementTypeInput, settlementAmountInput, commonDebtInput].forEach(function (input) {
-    if (input) input.addEventListener("input", updateSettlementExample);
-    if (input) input.addEventListener("change", updateSettlementExample);
-  });
+  var settlementLabel = document.getElementById("settlement-example-label");
+  var settlementPreviewURL = "/c/{{ .Club.ID | js }}/settings/preview";
+  var settlementPreviewTimer = null;
+  var settlementPreviewSeq = 0;
   function updateCommonDebtFieldState(type) {
     if (!commonDebtInput) return;
     var field = document.getElementById("common-debt-equal-field");
@@ -457,8 +349,55 @@
     commonDebtInput.disabled = disabled;
     if (field) field.classList.toggle("is-disabled", disabled);
   }
+  function renderSettlementPreview(rows) {
+    rows.forEach(function (row) {
+      var cell = document.querySelector('[data-example-player="' + row.player_id + '"]');
+      if (!cell) return;
+      cell.textContent = row.amount_cents < 0
+        ? "-" + Math.floor(Math.abs(row.amount_cents) / 100) + "," + String(Math.abs(row.amount_cents) % 100).padStart(2, "0") + " kr."
+        : Math.floor(row.amount_cents / 100) + "," + String(row.amount_cents % 100).padStart(2, "0") + " kr.";
+    });
+  }
+  function scheduleSettlementPreview() {
+    if (!settingsForm || !settlementTypeInput) return;
+    if (settlementPreviewTimer) clearTimeout(settlementPreviewTimer);
+    settlementPreviewTimer = setTimeout(function () {
+      var seq = ++settlementPreviewSeq;
+      fetch(settlementPreviewURL, {
+        method: "POST",
+        body: new FormData(settingsForm),
+        headers: { "Accept": "application/json" },
+        credentials: "same-origin"
+      }).then(function (res) {
+        return res.json();
+      }).then(function (data) {
+        if (seq !== settlementPreviewSeq) return;
+        if (data.error) {
+          if (settlementLabel) settlementLabel.textContent = data.error;
+          return;
+        }
+        renderSettlementPreview(data.rows || []);
+        if (settlementLabel) {
+          settlementLabel.textContent = "Eksempel med nuværende stilling og " +
+            (settlementTypeInput.value === "common_debt" ? "fælles gæld" : "pointafregning") +
+            ".";
+        }
+      }).catch(function () {});
+    }, 180);
+  }
+  [settlementTypeInput, settlementAmountInput, commonDebtInput].forEach(function (input) {
+    if (input) input.addEventListener("input", function () {
+      updateCommonDebtFieldState(settlementTypeInput ? settlementTypeInput.value : "");
+      scheduleSettlementPreview();
+    });
+    if (input) input.addEventListener("change", function () {
+      updateCommonDebtFieldState(settlementTypeInput ? settlementTypeInput.value : "");
+      scheduleSettlementPreview();
+    });
+  });
   if (settlementTypeInput) {
-    updateSettlementExample();
+    updateCommonDebtFieldState(settlementTypeInput.value);
+    scheduleSettlementPreview();
   }
 })();
 </script>

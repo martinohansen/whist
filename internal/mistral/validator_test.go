@@ -69,8 +69,8 @@ func TestValidateParsedNote(t *testing.T) {
 		},
 		{
 			name: "trick total not summing to 13",
-			note: "Anne/Bo 8 -> 9",
-			parsed: parsedWithRows(gameRow("Anne/Bo 8 -> 9", DraftGame{
+			note: "bad trick row",
+			parsed: parsedWithRows(gameRow("bad trick row", DraftGame{
 				MeldingName: "8",
 				Players: []DraftPlayer{
 					{Name: "Anne", Role: "melder", Tricks: 4},

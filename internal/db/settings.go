@@ -2,7 +2,6 @@ package db
 
 import (
 	"database/sql"
-	"errors"
 	"strings"
 )
 
@@ -169,29 +168,5 @@ func (s *Store) UpdateSettings(clubID string, update SettingsUpdate) error {
 }
 
 func checkSeasonOverlapTx(tx *sql.Tx, clubID string, excludeID int, start, end string) error {
-	start = strings.TrimSpace(start)
-	end = strings.TrimSpace(end)
-	if start == "" {
-		return errors.New("start date required")
-	}
-	var rows *sql.Rows
-	var err error
-	if end == "" {
-		rows, err = tx.Query(`
-			SELECT id FROM seasons WHERE club_id = ? AND id != ?
-			  AND (end_date IS NULL OR end_date >= ?)`, clubID, excludeID, start)
-	} else {
-		rows, err = tx.Query(`
-			SELECT id FROM seasons WHERE club_id = ? AND id != ?
-			  AND start_date <= ?
-			  AND (end_date IS NULL OR end_date >= ?)`, clubID, excludeID, end, start)
-	}
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	if rows.Next() {
-		return ErrSeasonOverlap
-	}
-	return rows.Err()
+	return checkSeasonOverlapQuery(tx, clubID, excludeID, start, end)
 }

@@ -83,6 +83,10 @@ type parsedRow struct {
 	Game      DraftGame `json:"game"`
 }
 
+type playerColumnRoleTable struct {
+	PlayersByColumn map[int]string
+}
+
 // OCR sends a single image to Mistral's OCR endpoint and returns the
 // concatenated markdown from all returned pages.
 func (c *Client) OCR(ctx context.Context, img []byte, mime string) (string, error) {
@@ -482,6 +486,7 @@ func validateParsedNote(markdown string, parsed parsedNote, meldings []db.Meldin
 	for _, player := range players {
 		playerAliases[player.Name] = player.Name
 	}
+	roleTable := inferPlayerColumnRoleTable(markdown, players)
 
 	sourceRows := meaningfulSourceRows(markdown)
 	accountedRows := make([]string, 0, len(parsed.Rows))
@@ -508,7 +513,7 @@ func validateParsedNote(markdown string, parsed parsedNote, meldings []db.Meldin
 		if row.Decision != "game" {
 			continue
 		}
-		game := canonicalizeClearSourceFacts(row.SourceRow, row.Game, meldingByName)
+		game := canonicalizeClearSourceFacts(row.SourceRow, row.Game, meldingByName, roleTable)
 		if source != "" && !sourceRowCoversMeaningfulLine(source, sourceRows) {
 			errors = append(errors, fmt.Sprintf("%s: game source_row %q does not cover a complete source row", rowRef, source))
 		}
@@ -547,28 +552,161 @@ func sourceRowCoversMeaningfulLine(source string, sourceRows []string) bool {
 	return false
 }
 
-func canonicalizeClearSourceFacts(sourceRow string, game DraftGame, meldingByName map[string]db.Melding) DraftGame {
+func canonicalizeClearSourceFacts(sourceRow string, game DraftGame, meldingByName map[string]db.Melding, roleTable playerColumnRoleTable) DraftGame {
+	game.Players = normalizePlayerColumnRoles(sourceRow, game.Players, roleTable)
 	textual := textualNoloMatches(sourceRow, meldingByName)
 	if len(textual) == 1 {
 		if meldingByName[textual[0]].Type == db.MeldingTypeNolo {
 			game.MeldingName = textual[0]
 		}
+	}
+	current, ok := meldingByName[game.MeldingName]
+	if !ok {
 		return game
 	}
-	nums := intsInString(sourceRow)
-	if len(nums) < 2 {
+	switch current.Type {
+	case db.MeldingTypeNormal:
+		if expected, found := normalMeldSideTricks(sourceRow, current); found {
+			game.Players = normalizeTeamTricks(game.Players, expected)
+		}
+		return game
+	case db.MeldingTypeNolo:
+		nums := intsInString(sourceRow)
+		if len(textual) == 0 && len(nums) >= 2 {
+			var matches []string
+			for name, melding := range meldingByName {
+				if melding.Type == db.MeldingTypeNolo && melding.Bid == nums[0] {
+					matches = append(matches, name)
+				}
+			}
+			if len(matches) == 1 {
+				game.MeldingName = matches[0]
+			}
+		}
+		game.Players = normalizeNoloTricks(sourceRow, game.Players)
+		return game
+	default:
 		return game
 	}
-	var matches []string
-	for name, melding := range meldingByName {
-		if melding.Type == db.MeldingTypeNolo && melding.Bid == nums[0] {
-			matches = append(matches, name)
+}
+
+func inferPlayerColumnRoleTable(markdown string, players []db.Player) playerColumnRoleTable {
+	playerNames := map[string]bool{}
+	for _, player := range players {
+		playerNames[player.Name] = true
+	}
+	for _, line := range strings.Split(markdown, "\n") {
+		if !strings.Contains(line, "|") {
+			continue
+		}
+		cells := splitTableCells(line)
+		playersByColumn := map[int]string{}
+		for i, cell := range cells {
+			if playerNames[cell] {
+				playersByColumn[i] = cell
+			}
+		}
+		if len(playersByColumn) >= 2 {
+			return playerColumnRoleTable{PlayersByColumn: playersByColumn}
 		}
 	}
-	if len(matches) == 1 {
-		game.MeldingName = matches[0]
+	return playerColumnRoleTable{}
+}
+
+func normalizePlayerColumnRoles(sourceRow string, players []DraftPlayer, roleTable playerColumnRoleTable) []DraftPlayer {
+	if len(roleTable.PlayersByColumn) == 0 || !strings.Contains(sourceRow, "|") {
+		return players
 	}
-	return game
+	cells := splitTableCells(sourceRow)
+	var melder, makker string
+	for i, cell := range cells {
+		name, ok := roleTable.PlayersByColumn[i]
+		if !ok {
+			continue
+		}
+		switch strings.ToUpper(strings.TrimSpace(cell)) {
+		case "M":
+			melder = name
+		case "X":
+			makker = name
+		}
+	}
+	if melder == "" {
+		return players
+	}
+	out := append([]DraftPlayer(nil), players...)
+	for i := range out {
+		switch out[i].Name {
+		case melder:
+			out[i].Role = "melder"
+		case makker:
+			out[i].Role = "makker"
+		default:
+			out[i].Role = "modspil"
+		}
+	}
+	return out
+}
+
+func splitTableCells(line string) []string {
+	parts := strings.Split(strings.Trim(line, "|"), "|")
+	cells := make([]string, 0, len(parts))
+	for _, part := range parts {
+		cells = append(cells, strings.TrimSpace(part))
+	}
+	return cells
+}
+
+func normalizeTeamTricks(players []DraftPlayer, meldSide int) []DraftPlayer {
+	out := append([]DraftPlayer(nil), players...)
+	modspilLeft := 13 - meldSide
+	for i := range out {
+		switch out[i].Role {
+		case "melder":
+			out[i].Tricks = meldSide
+		case "makker":
+			out[i].Tricks = 0
+		case "modspil":
+			out[i].Tricks = modspilLeft
+			modspilLeft = 0
+		}
+	}
+	return out
+}
+
+func normalizeNoloTricks(sourceRow string, players []DraftPlayer) []DraftPlayer {
+	nums := intsInString(sourceRow)
+	if len(nums) == 0 {
+		return players
+	}
+	out := append([]DraftPlayer(nil), players...)
+	makkerCount := 0
+	for _, player := range out {
+		if player.Role == "makker" {
+			makkerCount++
+		}
+	}
+	meldSide := nums[len(nums)-1]
+	if makkerCount > 0 && len(nums) >= 2 {
+		meldSide = nums[len(nums)-2] + nums[len(nums)-1]
+	}
+	modspilLeft := 13 - meldSide
+	for i := range out {
+		switch out[i].Role {
+		case "melder":
+			if makkerCount > 0 && len(nums) >= 2 {
+				out[i].Tricks = nums[len(nums)-2]
+			} else {
+				out[i].Tricks = nums[len(nums)-1]
+			}
+		case "makker":
+			out[i].Tricks = nums[len(nums)-1]
+		case "modspil":
+			out[i].Tricks = modspilLeft
+			modspilLeft = 0
+		}
+	}
+	return out
 }
 
 func playerAliasMap(aliases []parsedPlayerAlias, playerNames map[string]bool) map[string]string {

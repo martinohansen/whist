@@ -230,6 +230,8 @@ func (a *App) handleClubRoute(w http.ResponseWriter, r *http.Request) {
 		a.handleDeletePlayer(w, r, club, pid)
 	case sub == "games/save":
 		a.handleSaveGame(w, r, club)
+	case sub == "games/preview":
+		a.handlePreviewGame(w, r, club)
 	case sub == "import/analyze":
 		a.handleAnalyzeImport(w, r, club)
 	case sub == "import/review":
@@ -263,6 +265,8 @@ func (a *App) handleClubRoute(w http.ResponseWriter, r *http.Request) {
 		a.handleSettings(w, r, club)
 	case sub == "settings/save":
 		a.handleSaveSettings(w, r, club)
+	case sub == "settings/preview":
+		a.handleSettlementExamplePreview(w, r, club)
 	case strings.HasPrefix(sub, "seasons/"):
 		rest := strings.TrimPrefix(sub, "seasons/")
 		if idStr, ok := strings.CutSuffix(rest, "/delete"); ok {

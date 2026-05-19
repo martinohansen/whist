@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -51,6 +53,23 @@ func post(t *testing.T, h http.Handler, path string, form url.Values) *httptest.
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func multipartPost(t *testing.T, h http.Handler, path string, write func(*multipart.Writer) error) *httptest.ResponseRecorder {
+	t.Helper()
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	if err := write(w); err != nil {
+		t.Fatalf("write multipart: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close multipart: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, path, &buf)
+	req.Header.Set("Content-Type", w.FormDataContentType())
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec
@@ -197,7 +216,6 @@ func TestSettlementsPageRendersPreviewValidationTotalsAndHistory(t *testing.T) {
 		`200,00 kr.`,
 		`-200,00 kr.`,
 		`Bogfør`,
-		`Fra spil #`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("settlements page missing %q: %s", want, body)
@@ -232,7 +250,7 @@ func TestSettlementsPageRendersPreviewValidationTotalsAndHistory(t *testing.T) {
 		`Samlet bogført i den valgte periode: 400,00 kr.`,
 		`Historik`,
 		`Pointafregning`,
-		`fra spil #`,
+		`#1 til #1 2026-05-10`,
 		`400,00 kr.`,
 		`Ingen endnu ikke bogførte spil.`,
 	} {
@@ -320,7 +338,7 @@ func TestSettlementsHistoryAndTotalsFollowSelectedSeason(t *testing.T) {
 	body := rec.Body.String()
 	for _, want := range []string{
 		"Samlet bogført i den valgte periode: 100,00 kr.",
-		"fra spil #" + itoa(janID) + " 2026-01-10",
+		"#" + itoa(janID) + " til #" + itoa(janID) + " 2026-01-10",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("January settlement view missing %q: %s", want, body)
@@ -335,7 +353,7 @@ func TestSettlementsHistoryAndTotalsFollowSelectedSeason(t *testing.T) {
 	body = rec.Body.String()
 	for _, want := range []string{
 		"Samlet bogført i den valgte periode: 300,00 kr.",
-		"fra spil #" + itoa(mayID) + " 2026-05-10",
+		"#" + itoa(mayID) + " til #" + itoa(mayID) + " 2026-05-10",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("May settlement view missing %q: %s", want, body)
@@ -600,6 +618,153 @@ func TestAddPlayerAndPlayGame(t *testing.T) {
 		if sc.Score != want {
 			t.Errorf("player %s role %s: score=%d want=%d", sc.Player.Name, sc.Role, sc.Score, want)
 		}
+	}
+}
+
+func TestGamePreviewUsesMultipartFormData(t *testing.T) {
+	app, store := newTestApp(t)
+	h := app.routes()
+
+	id := createClub(t, h, "Testklub")
+	for _, name := range []string{"Anna", "Bo", "Carl", "Dorthe"} {
+		rec := post(t, h, "/c/"+id+"/players/add", url.Values{"name": {name}})
+		assertStatus(t, rec, http.StatusSeeOther)
+	}
+	players, err := store.ListPlayers(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meldings, err := store.ListMeldings(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := multipartPost(t, h, "/c/"+id+"/games/preview", func(w *multipart.Writer) error {
+		if err := w.WriteField("played_at", "2026-05-11"); err != nil {
+			return err
+		}
+		if err := w.WriteField("melding_id", itoa(meldings[1].ID)); err != nil {
+			return err
+		}
+		for i, p := range players {
+			if err := w.WriteField("player_id", itoa(p.ID)); err != nil {
+				return err
+			}
+			switch i {
+			case 0:
+				if err := w.WriteField("role_"+itoa(p.ID), "melder"); err != nil {
+					return err
+				}
+				if err := w.WriteField("tricks_"+itoa(p.ID), "5"); err != nil {
+					return err
+				}
+			case 1:
+				if err := w.WriteField("role_"+itoa(p.ID), "makker"); err != nil {
+					return err
+				}
+				if err := w.WriteField("tricks_"+itoa(p.ID), "4"); err != nil {
+					return err
+				}
+			default:
+				if err := w.WriteField("role_"+itoa(p.ID), "modspil"); err != nil {
+					return err
+				}
+				if err := w.WriteField("tricks_"+itoa(p.ID), "2"); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+	assertStatus(t, rec, http.StatusOK)
+	var got struct {
+		Valid   bool   `json:"valid"`
+		Summary string `json:"summary"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.Valid {
+		t.Fatalf("preview valid=false message=%q summary=%q", got.Message, got.Summary)
+	}
+	if !strings.Contains(got.Summary, "+4") || !strings.Contains(got.Summary, "-4") {
+		t.Fatalf("preview summary missing scores: %q", got.Summary)
+	}
+}
+
+func TestSettlementPreviewUpdatesWhenCommonShareChanges(t *testing.T) {
+	app, store := newTestApp(t)
+	h := app.routes()
+
+	id := createClub(t, h, "Testklub")
+	if err := store.AddSeason(id, "Forår", "2026-01-01", "2026-06-30"); err != nil {
+		t.Fatal(err)
+	}
+	seasons, err := store.ListSeasons(id)
+	if err != nil || len(seasons) != 1 {
+		t.Fatalf("list seasons: err=%v len=%d", err, len(seasons))
+	}
+	var players []db.Player
+	for _, name := range []string{"Anna", "Bo", "Carl", "Dorthe"} {
+		player, err := store.AddPlayer(id, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		players = append(players, player)
+	}
+	meldings, err := store.ListMeldings(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddGame(id, mustDate(t, "2026-05-10"), meldings[0], []game.PlayerEntry{
+		{PlayerID: players[0].ID, Role: "melder", Tricks: 4},
+		{PlayerID: players[1].ID, Role: "makker", Tricks: 3},
+		{PlayerID: players[2].ID, Role: "modspil", Tricks: 3},
+		{PlayerID: players[3].ID, Role: "modspil", Tricks: 3},
+	}, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	postPreview := func(equal string) []settlementExampleRow {
+		rec := multipartPost(t, h, "/c/"+id+"/settings/preview", func(w *multipart.Writer) error {
+			fields := map[string]string{
+				"season":                    itoa(seasons[0].ID),
+				"default_settlement_type":   "common_debt",
+				"default_settlement_amount": "400,00",
+				"common_debt_equal_percent": equal,
+				"name":                      "Testklub",
+				"emoji":                     "🃏",
+				"rules":                     "",
+			}
+			for k, v := range fields {
+				if err := w.WriteField(k, v); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		assertStatus(t, rec, http.StatusOK)
+		var got struct {
+			Error string                 `json:"error"`
+			Rows  []settlementExampleRow `json:"rows"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Error != "" {
+			t.Fatalf("preview error for equal=%s: %s", equal, got.Error)
+		}
+		return got.Rows
+	}
+
+	rows50 := postPreview("50")
+	rows75 := postPreview("75")
+	if len(rows50) == 0 || len(rows75) == 0 {
+		t.Fatalf("missing preview rows: 50=%d 75=%d", len(rows50), len(rows75))
+	}
+	if rows50[0].AmountCents == rows75[0].AmountCents {
+		t.Fatalf("common share change did not affect preview: 50=%d 75=%d", rows50[0].AmountCents, rows75[0].AmountCents)
 	}
 }
 
