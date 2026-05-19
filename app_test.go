@@ -1128,7 +1128,7 @@ func TestSaveGameRejectsMoreThanFourPlayers(t *testing.T) {
 
 	rec := post(t, h, "/c/"+id+"/games/save", form)
 	assertStatus(t, rec, http.StatusOK)
-	if !strings.Contains(rec.Body.String(), "Vælg fire spillere.") {
+	if !strings.Contains(rec.Body.String(), "Skal have 4 spillere.") {
 		t.Fatalf("missing too-many-players error: %s", rec.Body.String())
 	}
 	games, err := store.ListGames(id)
@@ -1419,7 +1419,7 @@ func TestSaveDraftJSONReturnsServerValidity(t *testing.T) {
 	if got.Valid {
 		t.Fatalf("valid=true want false; issues=%v", got.Issues)
 	}
-	if !containsString(got.Issues, "Stik skal være 13 i alt") {
+	if !containsString(got.Issues, "Stik skal være 13 i alt.") {
 		t.Fatalf("issues=%v; want trick-sum issue", got.Issues)
 	}
 }

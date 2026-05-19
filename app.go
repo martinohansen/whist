@@ -75,8 +75,10 @@ type Store interface {
 	GetDraft(clubID string, id int) (db.Draft, error)
 	UpdateDraft(clubID string, id int, playedAt time.Time, meldingID int, note string, scores []db.DraftScore) error
 	DeleteDraft(clubID string, id int) error
-	ApproveDrafts(clubID string) (int, []int, error)
+	ApproveDrafts(clubID string) (int, []int, []db.DraftEdit, error)
 	RejectPendingDrafts(clubID string) error
+	AddImportBatch(clubID, batchID, markdown, extractedJSON string) error
+	GetImportBatch(batchID string) (db.ImportBatch, error)
 }
 
 // ImportClient is the Mistral surface used by the import handlers. Concrete
@@ -232,6 +234,8 @@ func (a *App) handleClubRoute(w http.ResponseWriter, r *http.Request) {
 		a.handleSaveGame(w, r, club)
 	case sub == "games/preview":
 		a.handlePreviewGame(w, r, club)
+	case sub == "games/defaults":
+		a.handleGameDefaults(w, r, club)
 	case sub == "import/analyze":
 		a.handleAnalyzeImport(w, r, club)
 	case sub == "import/review":

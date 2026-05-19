@@ -201,6 +201,22 @@
       summary.textContent = summaryText || "vælg melding og stik";
     }
 
+    function applyServerScores(scores) {
+      if (!Array.isArray(scores)) return;
+      const byPid = {};
+      scores.forEach(function (s) { byPid[String(s.player_id)] = s; });
+      cards.forEach(function (c) {
+        const sc = byPid[String(c.dataset.pid)];
+        if (sc && sc.role) {
+          setRole(c, sc.role);
+          setTricksVal(c, parseInt(sc.tricks, 10) || 0);
+        } else {
+          setRole(c, "");
+          setTricksVal(c, 0);
+        }
+      });
+    }
+
     function buildFormData() {
       const fd = new FormData();
       fd.set("played_at", dateInput.value || "");
@@ -233,6 +249,7 @@
           return res.json();
         }).then(function (data) {
           delete draftCard.dataset.saving;
+          applyServerScores(data.scores);
           applyIssues(data.issues || []);
           applyPreview(data.summary || "");
           if (savedEl) {
@@ -274,16 +291,9 @@
     });
 
     meldingSelect.addEventListener("change", function () {
-      if (!isNolo()) {
-        let seenMakker = false;
-        cards.forEach(function (c) {
-          if (getRole(c) !== "makker") return;
-          if (!seenMakker) { seenMakker = true; return; }
-          const counts = roleCounts();
-          if (counts.modspil < 2) setRole(c, "modspil");
-          else setRole(c, "");
-        });
-      }
+      // Role fixups (e.g. demoting extra makkers when leaving nolo) live in
+      // the server's normalizeDraftScores. Just send the current state and
+      // re-render from the server's response.
       refreshRoleBadges();
       scheduleSave();
     });

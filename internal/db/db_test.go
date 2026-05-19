@@ -89,7 +89,7 @@ func TestApproveDraftsCreatesValidGamesAndLeavesInvalidPending(t *testing.T) {
 		t.Fatalf("pending drafts=%d want 2", len(pending))
 	}
 
-	created, skipped, err := store.ApproveDrafts(club.ID)
+	created, skipped, _, err := store.ApproveDrafts(club.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

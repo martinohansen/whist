@@ -2,6 +2,13 @@
 <div class="stack">
   {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
 
+  {{if and (not .Editing) (gt .PendingDrafts 0)}}
+  <a class="import-banner import-banner-link" href="/c/{{.Club.ID}}/import/review">
+    <span class="import-banner-icon">📝</span>
+    <span>Du har {{.PendingDrafts}} {{if eq .PendingDrafts 1}}draft{{else}}drafts{{end}} til gennemgang</span>
+  </a>
+  {{end}}
+
   {{if not .Editing}}
   <form action="/c/{{.Club.ID}}/import/analyze" method="post" enctype="multipart/form-data" id="quick-import-form" class="import-banner">
     {{if .SeasonQuery}}<input type="hidden" name="season" value="{{.SeasonID}}" />{{end}}
@@ -165,75 +172,35 @@
 
   {{template "game-entry-shared-script" .}}
 
-  // Sum of tricks across active cards; sets total to 13 by adjusting one card
-  // if necessary (used when initializing/applying defaults).
-  function normalizeTotal() {
-    const active = activeCards();
-    if (active.length === 0) return;
-    let sum = active.reduce(function (a, c) { return a + getTricks(c); }, 0);
-    let diff = 13 - sum;
-    let i = 0;
-    let safety = active.length * 14 + 4;
-    while (diff !== 0 && safety-- > 0) {
-      const c = active[i % active.length];
-      const cv = getTricks(c);
-      if (diff > 0 && cv < 13) { setTricksVal(c, cv + 1); diff--; }
-      else if (diff < 0 && cv > 0) { setTricksVal(c, cv - 1); diff++; }
-      i++;
-    }
-  }
+  const defaultsURL = "/c/{{ .Club.ID | js }}/games/defaults";
+  let defaultsSeq = 0;
 
+  // Trick defaults are computed server-side (game.DefaultTricks). The client
+  // sends the current role layout and applies whatever tricks the server
+  // returns. Unselected cards always get 0 here so they don't carry stale
+  // counts from a previous configuration.
   function applyDefaultsForMelding() {
-    const opt = meldingSelect.selectedOptions[0];
-    if (!opt) return;
-    const bid = parseInt(opt.dataset.bid, 10);
-    const active = activeCards();
-    if (active.length !== 4) {
-      cards.forEach(function (c) { if (!getRole(c)) setTricksVal(c, 0); });
-      return;
-    }
-    if (isNolo()) {
-      // Each meld-side player independently aims for ≤ bid; default each
-      // to bid tricks (capped at 13 total) and split the remainder among
-      // modspil.
-      const counts = roleCounts();
-      const meldCount = counts.melder + counts.makker;
-      const modCount = counts.modspil;
-      const meldTotal = Math.min(meldCount * bid, 13);
-      const modTotal = 13 - meldTotal;
-      const meldEach = meldCount > 0 ? Math.floor(meldTotal / meldCount) : 0;
-      let meldExtra = meldTotal - meldEach * meldCount;
-      const modEach = modCount > 0 ? Math.floor(modTotal / modCount) : 0;
-      let modExtra = modTotal - modEach * modCount;
-      cards.forEach(function (c) {
-        const r = getRole(c);
-        if (r === "melder" || r === "makker") {
-          if (meldExtra > 0) { setTricksVal(c, meldEach + 1); meldExtra--; }
-          else setTricksVal(c, meldEach);
-        } else if (r === "modspil") {
-          if (modExtra > 0) { setTricksVal(c, modEach + 1); modExtra--; }
-          else setTricksVal(c, modEach);
-        } else setTricksVal(c, 0);
-      });
-      normalizeTotal();
-      return;
-    }
-    const meldEach = Math.floor(bid / 2);
-    const meldExtra = bid - meldEach * 2;
-    const rem = 13 - bid;
-    const modEach = Math.floor(rem / 2);
-    const modExtra = rem - modEach * 2;
-    let modGiven = 0;
-    cards.forEach(function (c) {
-      const r = getRole(c);
-      if (r === "melder") setTricksVal(c, meldEach + meldExtra);
-      else if (r === "makker") setTricksVal(c, meldEach);
-      else if (r === "modspil") {
-        if (modGiven === 0) { setTricksVal(c, modEach + modExtra); modGiven++; }
-        else setTricksVal(c, modEach);
-      } else setTricksVal(c, 0);
-    });
-    normalizeTotal();
+    cards.forEach(function (c) { if (!getRole(c)) setTricksVal(c, 0); });
+    if (activeCards().length !== 4) return Promise.resolve();
+    if (!meldingSelect.value || meldingSelect.value === "0") return Promise.resolve();
+    const fd = new FormData();
+    fd.set("melding_id", meldingSelect.value);
+    cards.forEach(function (c) { fd.append("role", getRole(c)); });
+    const seq = ++defaultsSeq;
+    return fetch(defaultsURL, {
+      method: "POST",
+      body: fd,
+      headers: { "Accept": "application/json" },
+      credentials: "same-origin",
+    }).then(function (res) { return res.json(); })
+      .then(function (data) {
+        if (seq !== defaultsSeq) return;
+        if (!Array.isArray(data.tricks)) return;
+        cards.forEach(function (c, i) {
+          const t = parseInt(data.tricks[i], 10);
+          setTricksVal(c, isNaN(t) ? 0 : t);
+        });
+      }).catch(function () {});
   }
 
   function buildPreviewFormData() {
@@ -289,8 +256,7 @@
         setRole(card, "");
         setTricksVal(card, 0);
       }
-      applyDefaultsForMelding();
-      schedulePreview();
+      applyDefaultsForMelding().then(schedulePreview);
     });
 
     const tricksEl = card.querySelector(".player-tricks");
@@ -321,8 +287,7 @@
       });
     }
     refreshRoleBadges();
-    applyDefaultsForMelding();
-    schedulePreview();
+    applyDefaultsForMelding().then(schedulePreview);
   });
 
   form.addEventListener("submit", function () {

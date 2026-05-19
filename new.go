@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -24,6 +25,7 @@ type newGameData struct {
 	FormAction        string
 	SubmitLabel       string
 	SelectedMeldingID int
+	PendingDrafts     int
 }
 
 type gameFormPlayer struct {
@@ -67,6 +69,14 @@ func (a *App) renderNewGame(w http.ResponseWriter, r *http.Request, club db.Club
 		FormAction:  clubPath(&club, "games/save"),
 		SubmitLabel: "Gem spil",
 	}
+	if a.importEnabled() {
+		drafts, err := a.store.ListPendingDrafts(club.ID)
+		if err != nil {
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+		data.PendingDrafts = len(drafts)
+	}
 	renderTemplate(w, "layout", data,
 		"templates/layout.html",
 		"templates/game_entry_shared.html",
@@ -106,6 +116,44 @@ func (a *App) handleSaveGame(w http.ResponseWriter, r *http.Request, club db.Clu
 	http.Redirect(w, r, clubPathForRequest(r, &club, "games"), http.StatusSeeOther)
 }
 
+// handleGameDefaults returns the trick distribution that the new-game form
+// would default to for the given melding + role layout. Roles arrive as
+// repeated `role` form values in display order (one per player card);
+// the response `tricks` array matches that length 1:1.
+func (a *App) handleGameDefaults(w http.ResponseWriter, r *http.Request, club db.Club) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	rawRoles := r.Form["role"]
+	roles := make([]string, len(rawRoles))
+	for i, raw := range rawRoles {
+		role, _ := game.NormalizeRole(raw)
+		roles[i] = role
+	}
+	tricks := make([]int, len(roles))
+	meldingID, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("melding_id")))
+	if meldingID > 0 {
+		melding, err := a.store.GetMelding(club.ID, meldingID)
+		if err == nil {
+			tricks = game.DefaultTricks(melding.Type, melding.Bid, roles)
+		} else if !errors.Is(err, db.ErrNotFound) {
+			http.Error(w, "db error", http.StatusInternalServerError)
+			return
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(struct {
+		Tricks []int `json:"tricks"`
+	}{Tricks: tricks}); err != nil {
+		slog.Error("encode game defaults", "err", err)
+	}
+}
+
 func (a *App) parseGameEntries(r *http.Request, club db.Club) (parsedGameForm, string, error) {
 	meldingID, err := strconv.Atoi(strings.TrimSpace(r.FormValue("melding_id")))
 	if err != nil {
@@ -138,12 +186,8 @@ func (a *App) parseGameEntries(r *http.Request, club db.Club) (parsedGameForm, s
 
 	var inputs []game.PlayerEntry
 	for _, id := range ids {
-		role := strings.TrimSpace(r.FormValue("role_" + strconv.Itoa(id)))
-		switch role {
-		case "melder":
-		case "makker":
-		case "modspil":
-		default:
+		role, ok := game.NormalizeRole(r.FormValue("role_" + strconv.Itoa(id)))
+		if !ok {
 			return parsedGameForm{}, "Hver spiller skal have en rolle.", nil
 		}
 		tricksRaw := strings.TrimSpace(r.FormValue("tricks_" + strconv.Itoa(id)))
@@ -200,23 +244,8 @@ func (a *App) loadGameFormPlayers(clubID string, scores []db.PlayerScore) ([]gam
 
 func gameEntryMessage(meldingType string, issues []game.ValidationIssue) string {
 	for _, issue := range issues {
-		switch issue {
-		case game.IssuePlayerCount:
-			return "Vælg fire spillere."
-		case game.IssueMelderCount:
-			if meldingType == db.MeldingTypeNolo {
-				return "Vælg én melder og tre andre spillere."
-			}
-			return "Vælg én melder og én makker."
-		case game.IssueMakkerCount, game.IssueModspilCount:
-			if meldingType == db.MeldingTypeNolo {
-				return "Vælg én melder og tre andre spillere."
-			}
-			return "Vælg én melder og én makker."
-		case game.IssueTrickRange:
-			return "Stik skal være 0–13."
-		case game.IssueTrickSum:
-			return "Stik skal være 13 i alt."
+		if msg := game.IssueMessage(meldingType, issue); msg != "" {
+			return msg
 		}
 	}
 	return ""

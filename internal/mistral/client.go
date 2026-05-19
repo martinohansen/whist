@@ -50,6 +50,41 @@ func New(apiKey string) *Client {
 
 func (c *Client) Enabled() bool { return c != nil && c.apiKey != "" }
 
+// Usage aggregates token (and cost, when reported) usage across Mistral
+// calls made with a ctx produced by WithUsage.
+type Usage struct {
+	PromptTokens     int
+	CompletionTokens int
+	TotalTokens      int
+	PromptCost       float64
+	CompletionCost   float64
+	TotalCost        float64
+	Calls            int
+}
+
+type usageCtxKey struct{}
+
+// WithUsage returns a derived context and a pointer that will accumulate
+// token usage from any Mistral call made through the returned context.
+func WithUsage(ctx context.Context) (context.Context, *Usage) {
+	u := &Usage{}
+	return context.WithValue(ctx, usageCtxKey{}, u), u
+}
+
+func addUsage(ctx context.Context, u Usage) {
+	acc, _ := ctx.Value(usageCtxKey{}).(*Usage)
+	if acc == nil {
+		return
+	}
+	acc.PromptTokens += u.PromptTokens
+	acc.CompletionTokens += u.CompletionTokens
+	acc.TotalTokens += u.TotalTokens
+	acc.PromptCost += u.PromptCost
+	acc.CompletionCost += u.CompletionCost
+	acc.TotalCost += u.TotalCost
+	acc.Calls++
+}
+
 // DraftGame is the LLM-extracted structure for a single game on the paper.
 type DraftGame struct {
 	PlayedAt    string        `json:"played_at,omitempty"`
@@ -1133,6 +1168,37 @@ func (c *Client) postJSON(ctx context.Context, path string, body any, out any) e
 	)
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("mistral %s: %s: %s", path, resp.Status, strings.TrimSpace(string(respBody)))
+	}
+	var usageEnvelope struct {
+		Usage struct {
+			PromptTokens     int     `json:"prompt_tokens"`
+			CompletionTokens int     `json:"completion_tokens"`
+			TotalTokens      int     `json:"total_tokens"`
+			PromptCost       float64 `json:"prompt_cost"`
+			CompletionCost   float64 `json:"completion_cost"`
+			TotalCost        float64 `json:"total_cost"`
+			Cost             float64 `json:"cost"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(respBody, &usageEnvelope); err == nil {
+		e := usageEnvelope.Usage
+		totalCost := e.TotalCost
+		if totalCost == 0 {
+			totalCost = e.Cost
+		}
+		if totalCost == 0 {
+			totalCost = e.PromptCost + e.CompletionCost
+		}
+		if e.TotalTokens > 0 || e.PromptTokens > 0 || e.CompletionTokens > 0 || totalCost > 0 {
+			addUsage(ctx, Usage{
+				PromptTokens:     e.PromptTokens,
+				CompletionTokens: e.CompletionTokens,
+				TotalTokens:      e.TotalTokens,
+				PromptCost:       e.PromptCost,
+				CompletionCost:   e.CompletionCost,
+				TotalCost:        totalCost,
+			})
+		}
 	}
 	return json.Unmarshal(respBody, out)
 }

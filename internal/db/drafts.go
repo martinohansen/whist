@@ -2,7 +2,9 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"sort"
 	"strings"
 	"time"
 
@@ -38,7 +40,8 @@ type DraftScore struct {
 	Tricks   int
 }
 
-// AddDrafts inserts a batch of drafts in one transaction.
+// AddDrafts inserts a batch of drafts in one transaction. Each draft's
+// initial state is snapshotted so ApproveDrafts can detect user edits.
 func (s *Store) AddDrafts(clubID, batchID string, drafts []Draft) error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -59,10 +62,11 @@ func (s *Store) AddDrafts(clubID, batchID string, drafts []Draft) error {
 		if status == "" {
 			status = DraftStatusPending
 		}
+		snapshot := draftFingerprint(d)
 		res, err := tx.Exec(`INSERT INTO game_drafts
-				(club_id, batch_id, played_at, melding_id, melding_name, note, status)
-			VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			clubID, batchID, playedAt, meldingID, d.MeldingName, d.Note, status)
+				(club_id, batch_id, played_at, melding_id, melding_name, note, status, original_snapshot)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			clubID, batchID, playedAt, meldingID, d.MeldingName, d.Note, status, snapshot)
 		if err != nil {
 			return err
 		}
@@ -82,6 +86,81 @@ func (s *Store) AddDrafts(clubID, batchID string, drafts []Draft) error {
 		}
 	}
 	return tx.Commit()
+}
+
+// ImportBatch is the model inputs/outputs for a single import session: the
+// OCR'd markdown that fed the extractor and the raw JSON list of games it
+// produced. Kept so we can replay or debug user-adjusted approvals.
+type ImportBatch struct {
+	BatchID       string
+	ClubID        string
+	Markdown      string
+	ExtractedJSON string
+	CreatedAt     time.Time
+}
+
+// AddImportBatch records the OCR'd markdown and the raw model extraction
+// for a batch. Safe to call before AddDrafts.
+func (s *Store) AddImportBatch(clubID, batchID, markdown, extractedJSON string) error {
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO import_batches
+			(batch_id, club_id, markdown, extracted_json)
+		VALUES (?, ?, ?, ?)`, batchID, clubID, markdown, extractedJSON)
+	return err
+}
+
+// GetImportBatch returns the stored markdown/extracted JSON for a batch.
+func (s *Store) GetImportBatch(batchID string) (ImportBatch, error) {
+	var b ImportBatch
+	err := s.db.QueryRow(`SELECT batch_id, club_id, markdown, extracted_json, created_at
+		FROM import_batches WHERE batch_id = ?`, batchID).
+		Scan(&b.BatchID, &b.ClubID, &b.Markdown, &b.ExtractedJSON, &b.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ImportBatch{}, ErrNotFound
+	}
+	return b, err
+}
+
+// draftFingerprint produces a canonical JSON representation of the
+// user-visible fields of a draft. Two drafts that produce the same
+// fingerprint are considered equivalent for the "was this edited?" check.
+func draftFingerprint(d Draft) string {
+	type scoreFP struct {
+		Position int    `json:"position"`
+		PlayerID int    `json:"player_id"`
+		RawName  string `json:"raw_name"`
+		Role     string `json:"role"`
+		Tricks   int    `json:"tricks"`
+	}
+	type fp struct {
+		PlayedAt    string    `json:"played_at"`
+		MeldingID   int       `json:"melding_id"`
+		MeldingName string    `json:"melding_name"`
+		Note        string    `json:"note"`
+		Scores      []scoreFP `json:"scores"`
+	}
+	out := fp{
+		MeldingID:   d.MeldingID,
+		MeldingName: strings.TrimSpace(d.MeldingName),
+		Note:        strings.TrimSpace(d.Note),
+		Scores:      make([]scoreFP, 0, len(d.Scores)),
+	}
+	if !d.PlayedAt.IsZero() {
+		out.PlayedAt = d.PlayedAt.UTC().Format("2006-01-02")
+	}
+	scores := make([]DraftScore, len(d.Scores))
+	copy(scores, d.Scores)
+	sort.Slice(scores, func(i, j int) bool { return scores[i].Position < scores[j].Position })
+	for _, sc := range scores {
+		out.Scores = append(out.Scores, scoreFP{
+			Position: sc.Position,
+			PlayerID: sc.PlayerID,
+			RawName:  strings.TrimSpace(sc.RawName),
+			Role:     sc.Role,
+			Tricks:   sc.Tricks,
+		})
+	}
+	b, _ := json.Marshal(out)
+	return string(b)
 }
 
 // ListPendingDrafts returns all pending drafts for a club, with scores attached.
@@ -217,45 +296,59 @@ func (s *Store) DeleteDraft(clubID string, id int) error {
 	return nil
 }
 
+// DraftEdit describes a draft whose state at approval time diverged from
+// the original AI-extracted snapshot recorded in AddDrafts.
+type DraftEdit struct {
+	DraftID    int
+	BatchID    string
+	Original   string // canonical-JSON snapshot from import time
+	Approved   string // canonical-JSON snapshot at approval time
+}
+
 // ApproveDrafts converts all pending drafts for a club into real games inside
 // a single transaction. Drafts that are invalid (missing melding, unlinked
 // player, wrong player count, tricks ≠ 13 in normal mode) are skipped and
 // returned as a separate slice; valid ones become games and their drafts are
-// marked approved. The first return value is the number of games created.
-func (s *Store) ApproveDrafts(clubID string) (created int, skipped []int, err error) {
+// marked approved. edits reports approved drafts whose current state
+// differs from the AI-extracted snapshot.
+func (s *Store) ApproveDrafts(clubID string) (created int, skipped []int, edits []DraftEdit, err error) {
 	tx, err := s.db.Begin()
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	defer tx.Rollback()
 
 	// Load pending drafts inside the tx for consistency.
 	rows, err := tx.Query(`
-		SELECT id, COALESCE(melding_id, 0), COALESCE(played_at, ''), note
+		SELECT id, batch_id, COALESCE(melding_id, 0), melding_name,
+			COALESCE(played_at, ''), note, COALESCE(original_snapshot, '')
 		FROM game_drafts
 		WHERE club_id = ? AND status = ?
 		ORDER BY created_at, id`, clubID, DraftStatusPending)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	type pend struct {
-		id        int
-		meldingID int
-		playedAt  sql.NullString
-		note      string
+		id          int
+		batchID     string
+		meldingID   int
+		meldingName string
+		playedAt    sql.NullString
+		note        string
+		snapshot    string
 	}
 	var pendings []pend
 	for rows.Next() {
 		var p pend
-		if err := rows.Scan(&p.id, &p.meldingID, &p.playedAt, &p.note); err != nil {
+		if err := rows.Scan(&p.id, &p.batchID, &p.meldingID, &p.meldingName, &p.playedAt, &p.note, &p.snapshot); err != nil {
 			rows.Close()
-			return 0, nil, err
+			return 0, nil, nil, err
 		}
 		pendings = append(pendings, p)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 
 	for _, p := range pendings {
@@ -274,30 +367,31 @@ func (s *Store) ApproveDrafts(clubID string) (created int, skipped []int, err er
 
 		// Fetch scores.
 		sRows, err := tx.Query(`
-			SELECT COALESCE(player_id, 0), role, tricks
+			SELECT position, COALESCE(player_id, 0), raw_name, role, tricks
 			FROM game_draft_scores WHERE draft_id = ? ORDER BY position`, p.id)
 		if err != nil {
-			return 0, nil, err
+			return 0, nil, nil, err
 		}
 		var entries []game.PlayerEntry
+		var dscores []DraftScore
 		bad := false
 		for sRows.Next() {
-			var pid, tricks int
-			var role string
-			if err := sRows.Scan(&pid, &role, &tricks); err != nil {
+			var sc DraftScore
+			if err := sRows.Scan(&sc.Position, &sc.PlayerID, &sc.RawName, &sc.Role, &sc.Tricks); err != nil {
 				sRows.Close()
-				return 0, nil, err
+				return 0, nil, nil, err
 			}
-			if pid == 0 || tricks < 0 || tricks > 13 {
+			dscores = append(dscores, sc)
+			if sc.PlayerID == 0 || sc.Tricks < 0 || sc.Tricks > 13 {
 				bad = true
 				continue
 			}
-			switch role {
+			switch sc.Role {
 			case game.RoleMelder, game.RoleMakker, game.RoleModspil:
 			default:
 				bad = true
 			}
-			entries = append(entries, game.PlayerEntry{PlayerID: pid, Role: role, Tricks: tricks})
+			entries = append(entries, game.PlayerEntry{PlayerID: sc.PlayerID, Role: sc.Role, Tricks: sc.Tricks})
 		}
 		sRows.Close()
 		if bad || len(game.ValidateEntries(m.Type, entries)) > 0 {
@@ -317,19 +411,40 @@ func (s *Store) ApproveDrafts(clubID string) (created int, skipped []int, err er
 		}
 
 		if err := insertGameTx(tx, clubID, playedAt, m, entries, p.note); err != nil {
-			return 0, nil, err
+			return 0, nil, nil, err
 		}
 		if _, err := tx.Exec(`UPDATE game_drafts SET status = ? WHERE id = ?`,
 			DraftStatusApproved, p.id); err != nil {
-			return 0, nil, err
+			return 0, nil, nil, err
 		}
 		created++
+
+		// Compare approved state against the original snapshot. Skip when
+		// no snapshot was recorded (drafts inserted before this column existed).
+		if p.snapshot == "" {
+			continue
+		}
+		current := draftFingerprint(Draft{
+			PlayedAt:    playedAt,
+			MeldingID:   p.meldingID,
+			MeldingName: p.meldingName,
+			Note:        p.note,
+			Scores:      dscores,
+		})
+		if current != p.snapshot {
+			edits = append(edits, DraftEdit{
+				DraftID:  p.id,
+				BatchID:  p.batchID,
+				Original: p.snapshot,
+				Approved: current,
+			})
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
-	return created, skipped, nil
+	return created, skipped, edits, nil
 }
 
 // insertGameTx mirrors AddGame but runs inside an existing transaction so we

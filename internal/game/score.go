@@ -1,6 +1,8 @@
 // Package game holds pure game-rule logic with no dependency on storage.
 package game
 
+import "strings"
+
 // Roles. The melder and their makker form the "melding side"; modspil are
 // the opponents. In nolo, makkers can optionally join the melder (or not) —
 // any of {1v3, 2v2, 3v1, 4v0} configurations is allowed.
@@ -9,6 +11,22 @@ const (
 	RoleMakker  = "makker"
 	RoleModspil = "modspil"
 )
+
+// NormalizeRole maps a free-form role string to one of the canonical role
+// constants. Returns ok=false for the empty string or any unrecognized
+// value; callers decide whether that is a hard error or a "user hasn't
+// chosen yet" state.
+func NormalizeRole(s string) (role string, ok bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case RoleMelder:
+		return RoleMelder, true
+	case RoleMakker:
+		return RoleMakker, true
+	case RoleModspil, "modspiller":
+		return RoleModspil, true
+	}
+	return "", false
+}
 
 // Melding types.
 const (

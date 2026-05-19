@@ -222,12 +222,53 @@ CREATE TABLE IF NOT EXISTS game_draft_scores (
 	tricks INTEGER NOT NULL DEFAULT 0,
 	PRIMARY KEY (draft_id, position)
 );
+
+CREATE TABLE IF NOT EXISTS import_batches (
+	batch_id TEXT PRIMARY KEY,
+	club_id TEXT NOT NULL REFERENCES clubs(id) ON DELETE CASCADE,
+	markdown TEXT NOT NULL DEFAULT '',
+	extracted_json TEXT NOT NULL DEFAULT '',
+	created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
 `
 	if _, err := db.Exec(schema); err != nil {
 		return err
 	}
 	if err := ensureClubColumns(db); err != nil {
 		return err
+	}
+	if err := ensureDraftColumns(db); err != nil {
+		return err
+	}
+	return nil
+}
+
+func ensureDraftColumns(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(game_drafts)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	hasOriginalSnapshot := false
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == "original_snapshot" {
+			hasOriginalSnapshot = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if !hasOriginalSnapshot {
+		if _, err := db.Exec(`ALTER TABLE game_drafts ADD COLUMN original_snapshot TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
 	}
 	return nil
 }

@@ -65,6 +65,8 @@ func (a *App) handleAnalyzeImport(w http.ResponseWriter, r *http.Request, club d
 
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 	defer cancel()
+	ctx, usage := mistral.WithUsage(ctx)
+	importStart := time.Now()
 
 	var pages []string
 	for _, fh := range files {
@@ -114,11 +116,36 @@ func (a *App) handleAnalyzeImport(w http.ResponseWriter, r *http.Request, club d
 
 	drafts := buildDrafts(games, meldings, players)
 	batchID, _ := randomBatchID()
+	extractedJSON, _ := json.Marshal(games)
+	if err := a.store.AddImportBatch(club.ID, batchID, markdown, string(extractedJSON)); err != nil {
+		slog.Error("add import batch", "err", err)
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
 	if err := a.store.AddDrafts(club.ID, batchID, drafts); err != nil {
 		slog.Error("add drafts", "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
+	attrs := []any{
+		"club_id", club.ID,
+		"batch_id", batchID,
+		"files", len(files),
+		"drafts", len(drafts),
+		"elapsed_ms", time.Since(importStart).Milliseconds(),
+		"mistral_calls", usage.Calls,
+		"prompt_tokens", usage.PromptTokens,
+		"completion_tokens", usage.CompletionTokens,
+		"total_tokens", usage.TotalTokens,
+	}
+	if usage.TotalCost > 0 || usage.PromptCost > 0 || usage.CompletionCost > 0 {
+		attrs = append(attrs,
+			"prompt_cost", usage.PromptCost,
+			"completion_cost", usage.CompletionCost,
+			"total_cost", usage.TotalCost,
+		)
+	}
+	slog.InfoContext(ctx, "import complete", attrs...)
 	http.Redirect(w, r, clubPathForRequest(r, &club, "import/review"), http.StatusSeeOther)
 }
 
@@ -196,7 +223,12 @@ func (a *App) handleSaveDraft(w http.ResponseWriter, r *http.Request, club db.Cl
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := r.ParseForm(); err != nil {
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/") {
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			http.Error(w, "bad form", http.StatusBadRequest)
+			return
+		}
+	} else if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return
 	}
@@ -210,14 +242,15 @@ func (a *App) handleSaveDraft(w http.ResponseWriter, r *http.Request, club db.Cl
 	for i := range 4 {
 		idx := strconv.Itoa(i)
 		pidStr := strings.TrimSpace(r.FormValue("player_id_" + idx))
-		role := strings.TrimSpace(r.FormValue("role_" + idx))
+		rawRole := r.FormValue("role_" + idx)
 		tricksStr := strings.TrimSpace(r.FormValue("tricks_" + idx))
 		rawName := strings.TrimSpace(r.FormValue("raw_name_" + idx))
-		if pidStr == "" && role == "" && tricksStr == "" && rawName == "" {
+		if pidStr == "" && strings.TrimSpace(rawRole) == "" && tricksStr == "" && rawName == "" {
 			continue
 		}
 		pid, _ := strconv.Atoi(pidStr)
 		tricks, _ := strconv.Atoi(tricksStr)
+		role, _ := game.NormalizeRole(rawRole)
 		scores = append(scores, db.DraftScore{
 			Position: i,
 			PlayerID: pid,
@@ -226,6 +259,21 @@ func (a *App) handleSaveDraft(w http.ResponseWriter, r *http.Request, club db.Cl
 			Tricks:   tricks,
 		})
 	}
+
+	meldings, err := a.store.ListMeldings(club.ID)
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+	meldingByID := make(map[int]db.Melding, len(meldings))
+	for _, m := range meldings {
+		meldingByID[m.ID] = m
+	}
+	meldingType := ""
+	if m, ok := meldingByID[meldingID]; ok {
+		meldingType = m.Type
+	}
+	scores = normalizeDraftScores(meldingType, scores)
 
 	if err := a.store.UpdateDraft(club.ID, draftID, playedAt, meldingID, note, scores); err != nil {
 		if errors.Is(err, db.ErrNotFound) {
@@ -242,15 +290,6 @@ func (a *App) handleSaveDraft(w http.ResponseWriter, r *http.Request, club db.Cl
 			http.Error(w, "db error", http.StatusInternalServerError)
 			return
 		}
-		meldings, err := a.store.ListMeldings(club.ID)
-		if err != nil {
-			http.Error(w, "db error", http.StatusInternalServerError)
-			return
-		}
-		meldingByID := make(map[int]db.Melding, len(meldings))
-		for _, m := range meldings {
-			meldingByID[m.ID] = m
-		}
 		issues := validateDraft(draft, meldingByID)
 		summary := "Vælg en melding"
 		if m, ok := meldingByID[draft.MeldingID]; ok {
@@ -261,21 +300,67 @@ func (a *App) handleSaveDraft(w http.ResponseWriter, r *http.Request, club db.Cl
 			}
 			summary = draftSummary(draft, m, players)
 		}
+		type respScore struct {
+			PlayerID int    `json:"player_id"`
+			Role     string `json:"role"`
+			Tricks   int    `json:"tricks"`
+		}
+		out := make([]respScore, 0, len(draft.Scores))
+		for _, sc := range draft.Scores {
+			out = append(out, respScore{PlayerID: sc.PlayerID, Role: sc.Role, Tricks: sc.Tricks})
+		}
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(struct {
-			Valid   bool     `json:"valid"`
-			Issues  []string `json:"issues"`
-			Summary string   `json:"summary"`
+			Valid   bool        `json:"valid"`
+			Issues  []string    `json:"issues"`
+			Summary string      `json:"summary"`
+			Scores  []respScore `json:"scores"`
 		}{
 			Valid:   len(issues) == 0,
 			Issues:  issues,
 			Summary: summary,
+			Scores:  out,
 		}); err != nil {
 			slog.Error("encode draft save response", "err", err)
 		}
 		return
 	}
 	http.Redirect(w, r, clubPathForRequest(r, &club, "import/review"), http.StatusSeeOther)
+}
+
+// normalizeDraftScores enforces role-shape rules for the chosen melding
+// type. For non-nolo meldings only one makker is allowed: extras demote to
+// modspil if there is room (< 2), otherwise they release. Nolo allows
+// multiple "går med" makkers, so no demotion is applied. This used to
+// live in the import-review JS; it belongs on the server so every save
+// trips the same rules.
+func normalizeDraftScores(meldingType string, scores []db.DraftScore) []db.DraftScore {
+	if meldingType == db.MeldingTypeNolo || len(scores) == 0 {
+		return scores
+	}
+	seenMakker := false
+	for i := range scores {
+		if scores[i].Role != game.RoleMakker {
+			continue
+		}
+		if !seenMakker {
+			seenMakker = true
+			continue
+		}
+		modspilCount := 0
+		for j := range scores {
+			if scores[j].Role == game.RoleModspil {
+				modspilCount++
+			}
+		}
+		if modspilCount < 2 {
+			scores[i].Role = game.RoleModspil
+		} else {
+			scores[i].Role = ""
+			scores[i].Tricks = 0
+		}
+	}
+	return scores
 }
 
 func (a *App) handleDeleteDraft(w http.ResponseWriter, r *http.Request, club db.Club, draftID int) {
@@ -304,11 +389,28 @@ func (a *App) handleApproveDrafts(w http.ResponseWriter, r *http.Request, club d
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	created, skipped, err := a.store.ApproveDrafts(club.ID)
+	created, skipped, edits, err := a.store.ApproveDrafts(club.ID)
 	if err != nil {
 		slog.Error("approve drafts", "err", err)
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
+	}
+	for _, e := range edits {
+		batch, berr := a.store.GetImportBatch(e.BatchID)
+		attrs := []any{
+			"club_id", club.ID,
+			"batch_id", e.BatchID,
+			"draft_id", e.DraftID,
+			"original", e.Original,
+			"approved", e.Approved,
+		}
+		if berr == nil {
+			attrs = append(attrs,
+				"model_input_markdown", batch.Markdown,
+				"model_output_json", batch.ExtractedJSON,
+			)
+		}
+		slog.Warn("imported game adjusted before approval", attrs...)
 	}
 	if len(skipped) > 0 {
 		a.renderReview(w, r, club,
@@ -385,10 +487,11 @@ func buildDrafts(games []mistral.DraftGame, meldings []db.Melding, players []db.
 			if i >= 4 {
 				break
 			}
+			role, _ := game.NormalizeRole(p.Role)
 			sc := db.DraftScore{
 				Position: i,
 				RawName:  p.Name,
-				Role:     normalizeRole(p.Role),
+				Role:     role,
 				Tricks:   p.Tricks,
 			}
 			if pl, ok := playerByName[strings.ToLower(strings.TrimSpace(p.Name))]; ok {
@@ -399,18 +502,6 @@ func buildDrafts(games []mistral.DraftGame, meldings []db.Melding, players []db.
 		out = append(out, d)
 	}
 	return out
-}
-
-func normalizeRole(r string) string {
-	switch strings.ToLower(strings.TrimSpace(r)) {
-	case "melder":
-		return "melder"
-	case "makker":
-		return "makker"
-	case "modspil", "modspiller":
-		return "modspil"
-	}
-	return ""
 }
 
 // validateDraft returns a list of human-readable issues. Empty list means
@@ -424,15 +515,11 @@ func validateDraft(d db.Draft, meldings map[int]db.Melding) []string {
 		issues = append(issues, "Skal have 4 spillere")
 	}
 	entries := make([]game.PlayerEntry, 0, len(d.Scores))
-	var melder int
 	for _, sc := range d.Scores {
 		if sc.PlayerID == 0 {
 			issues = append(issues, "Vælg spiller for "+sc.RawName)
 		}
-		switch sc.Role {
-		case "melder":
-			melder++
-		default:
+		if sc.Role == "" {
 			issues = append(issues, "Mangler rolle")
 		}
 		entries = append(entries, game.PlayerEntry{PlayerID: sc.PlayerID, Role: sc.Role, Tricks: sc.Tricks})
@@ -441,30 +528,21 @@ func validateDraft(d db.Draft, meldings map[int]db.Melding) []string {
 	if d.MeldingID != 0 && !hasMelding {
 		issues = append(issues, "Ukendt melding")
 	}
-	if melder != 1 {
-		issues = append(issues, "Præcis én melder")
-	}
+	mtype := ""
 	if hasMelding {
-		for _, issue := range game.ValidateEntries(m.Type, entries) {
-			switch issue {
-			case game.IssuePlayerCount:
-				// Already reported above from the draft shape itself.
-			case game.IssueMelderCount:
-				// Already reported above to keep the existing wording.
-			case game.IssueMakkerCount:
-				issues = append(issues, "Præcis én makker")
-			case game.IssueModspilCount:
-				if m.Type == db.MeldingTypeNolo {
-					issues = append(issues, "Skal have tre andre spillere")
-				} else {
-					issues = append(issues, "Præcis to modspil")
-				}
-			case game.IssueTrickRange:
-				issues = append(issues, "Stik skal være 0–13")
-			case game.IssueTrickSum:
-				issues = append(issues, "Stik skal være 13 i alt")
-			}
+		mtype = m.Type
+	}
+	// Player-count was already reported above from the draft shape; trick
+	// sum / makker / modspil counts only make sense once a melding is
+	// chosen, so skip them otherwise.
+	for _, issue := range game.ValidateEntries(mtype, entries) {
+		if issue == game.IssuePlayerCount {
+			continue
 		}
+		if !hasMelding && issue != game.IssueMelderCount && issue != game.IssueTrickRange {
+			continue
+		}
+		issues = append(issues, game.IssueMessage(mtype, issue))
 	}
 	return issues
 }

@@ -598,11 +598,14 @@ func describeActual(g DraftGame) string {
 
 // TestExtractFixtures hits the live Mistral API for each fixture and asserts
 // the LLM produced the expected melding + role assignment + tricks for every
-// game. Skipped when MISTRAL_API_KEY is empty so `go test ./...` stays green
-// without credentials. Run locally with
+// game. Off by default — it's slow (minutes) and akin to an integration
+// test. Opt in with WHIST_MISTRAL_INTEGRATION=1 and a valid MISTRAL_API_KEY:
 //
-//	MISTRAL_API_KEY=... go test ./internal/mistral -run TestExtractFixtures -v
+//	WHIST_MISTRAL_INTEGRATION=1 MISTRAL_API_KEY=... go test ./internal/mistral -run TestExtractFixtures -v
 func TestExtractFixtures(t *testing.T) {
+	if os.Getenv("WHIST_MISTRAL_INTEGRATION") == "" {
+		t.Skip("WHIST_MISTRAL_INTEGRATION not set; skipping live Mistral integration test")
+	}
 	apiKey := os.Getenv("MISTRAL_API_KEY")
 	if apiKey == "" {
 		t.Skip("MISTRAL_API_KEY not set; skipping fixture integration test")
