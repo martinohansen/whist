@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"sort"
@@ -77,9 +78,27 @@ func (c *clubFixture) otherThree(a string) []string {
 	return out
 }
 
+func (c *clubFixture) hasPlayer(name string) bool {
+	for _, p := range c.players {
+		if p.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *clubFixture) meldingByName(name string) (db.Melding, bool) {
+	for _, m := range c.meldings {
+		if m.Name == name {
+			return m, true
+		}
+	}
+	return db.Melding{}, false
+}
+
 // normal builds an expectedGame for a "normal" melding where the paper
-// gives only the meld-side total. Per-player tricks aren't asserted; the
-// meld-side and modspil sums are.
+// gives the meld-side trick total directly. Per-player tricks aren't asserted;
+// the meld-side and modspil sums are.
 func (c *clubFixture) normal(melding, melder, makker string, meldSum int) expectedGame {
 	mod := c.otherTwo(melder, makker)
 	return expectedGame{
@@ -93,6 +112,18 @@ func (c *clubFixture) normal(melding, melder, makker string, meldSum int) expect
 		MeldSideSum: meldSum,
 		ModspilSum:  13 - meldSum,
 	}
+}
+
+// normalResult builds an expectedGame for a "normal" melding where the paper
+// gives only the result relative to the bid ("+1", "-2", "=") rather than an
+// explicit trick total. Keeping this separate from normal makes the
+// result-delta extraction path visible in the fixture table.
+func (c *clubFixture) normalResult(melding, melder, makker string, delta int) expectedGame {
+	m, ok := c.meldingByName(melding)
+	if !ok {
+		panic(fmt.Sprintf("unknown melding %q", melding))
+	}
+	return c.normal(melding, melder, makker, m.Bid+delta)
 }
 
 // solo builds an expectedGame for a nolo played alone. melderTricks is
@@ -343,27 +374,27 @@ var noteCases = []noteCase{
 		file: "note-11.md",
 		club: clubEsmakker,
 		expected: []expectedGame{
-			clubEsmakker.normal("8 spar", Anne, Carl, 9),
-			clubEsmakker.normal("9 hjerter", Bo, Dina, 7),
-			clubEsmakker.normal("7 klør", Carl, Anne, 7),
+			clubEsmakker.normalResult("8 spar", Anne, Carl, +1),
+			clubEsmakker.normalResult("9 hjerter", Bo, Dina, -2),
+			clubEsmakker.normalResult("7 klør", Carl, Anne, 0),
 		},
 	},
 	{
 		file: "note-12.md",
 		club: clubEsmakker,
 		expected: []expectedGame{
-			clubEsmakker.normal("8 spar", Anne, Carl, 9),
-			clubEsmakker.normal("9 hjerter", Bo, Dina, 7),
-			clubEsmakker.normal("7 klør", Carl, Anne, 7),
-			clubEsmakker.normal("10 ruder", Dina, Bo, 11),
+			clubEsmakker.normalResult("8 spar", Anne, Carl, +1),
+			clubEsmakker.normalResult("9 hjerter", Bo, Dina, -2),
+			clubEsmakker.normalResult("7 klør", Carl, Anne, 0),
+			clubEsmakker.normalResult("10 ruder", Dina, Bo, +1),
 		},
 	},
 	{
 		file: "note-13.md",
 		club: clubEsmakker,
 		expected: []expectedGame{
-			clubEsmakker.normal("8 spar", Anne, Carl, 9),
-			clubEsmakker.normal("9 hjerter", Bo, Dina, 7),
+			clubEsmakker.normalResult("8 spar", Anne, Carl, +1),
+			clubEsmakker.normalResult("9 hjerter", Bo, Dina, -2),
 		},
 	},
 	{
@@ -379,18 +410,18 @@ var noteCases = []noteCase{
 		file: "note-15.md",
 		club: clubEsmakker,
 		expected: []expectedGame{
-			clubEsmakker.normal("8 spar", Anne, Carl, 9),
-			clubEsmakker.normal("9 hjerter", Bo, Dina, 7),
-			clubEsmakker.normal("7 klør", Carl, Anne, 7),
+			clubEsmakker.normalResult("8 spar", Anne, Carl, +1),
+			clubEsmakker.normalResult("9 hjerter", Bo, Dina, -2),
+			clubEsmakker.normalResult("7 klør", Carl, Anne, 0),
 		},
 	},
 	{
 		file: "note-16.md",
 		club: clubEsmakker,
 		expected: []expectedGame{
-			clubEsmakker.normal("8 spar", Anne, Carl, 9),
-			clubEsmakker.normal("9 hjerter", Bo, Dina, 7),
-			clubEsmakker.normal("7 klør", Carl, Anne, 7),
+			clubEsmakker.normalResult("8 spar", Anne, Carl, +1),
+			clubEsmakker.normalResult("9 hjerter", Bo, Dina, -2),
+			clubEsmakker.normalResult("7 klør", Carl, Anne, 0),
 		},
 	},
 	{
@@ -403,6 +434,113 @@ var noteCases = []noteCase{
 			clubEsmakker.normal("10 ruder", Dina, Bo, 11),
 		},
 	},
+}
+
+func TestNoteCasesAreWellFormed(t *testing.T) {
+	noteFiles, err := fs.Glob(notesFS, "testdata/notes/*.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	caseFiles := map[string]struct{}{}
+	for _, tc := range noteCases {
+		fullPath := path.Join("testdata/notes", tc.file)
+		if _, ok := caseFiles[fullPath]; ok {
+			t.Errorf("duplicate note case for %s", tc.file)
+		}
+		caseFiles[fullPath] = struct{}{}
+
+		t.Run(tc.file, func(t *testing.T) {
+			if tc.club == nil {
+				t.Fatal("club is nil")
+			}
+			if got := len(tc.club.players); got != 4 {
+				t.Fatalf("club has %d players, want 4", got)
+			}
+			if len(tc.expected) == 0 {
+				t.Fatal("expected games is empty")
+			}
+
+			for i, e := range tc.expected {
+				m, ok := tc.club.meldingByName(e.Melding)
+				if !ok {
+					t.Errorf("expected[%d]: unknown melding %q", i+1, e.Melding)
+					continue
+				}
+				assertExpectedGameWellFormed(t, i+1, tc.club, m, e)
+			}
+		})
+	}
+
+	if got, want := len(caseFiles), len(noteFiles); got != want {
+		t.Errorf("note case count = %d, embedded note file count = %d", got, want)
+	}
+	for _, file := range noteFiles {
+		if _, ok := caseFiles[file]; !ok {
+			t.Errorf("missing note case for %s", path.Base(file))
+		}
+	}
+}
+
+func assertExpectedGameWellFormed(t *testing.T, expIdx int, club *clubFixture, melding db.Melding, e expectedGame) {
+	t.Helper()
+	if got := len(e.Players); got != 4 {
+		t.Errorf("expected[%d]: %d players, want 4", expIdx, got)
+		return
+	}
+
+	seenPlayers := map[string]bool{}
+	roleCounts := map[string]int{}
+	for _, p := range e.Players {
+		if seenPlayers[p.Name] {
+			t.Errorf("expected[%d]: duplicate player %q", expIdx, p.Name)
+		}
+		seenPlayers[p.Name] = true
+		if !club.hasPlayer(p.Name) {
+			t.Errorf("expected[%d]: unknown player %q", expIdx, p.Name)
+		}
+		switch p.Role {
+		case "melder", "makker", "modspil":
+			roleCounts[p.Role]++
+		default:
+			t.Errorf("expected[%d]: unknown role %q for %s", expIdx, p.Role, p.Name)
+		}
+		if p.Tricks != dontCheck && (p.Tricks < 0 || p.Tricks > 13) {
+			t.Errorf("expected[%d]: %s tricks = %d, want 0..13 or dontCheck", expIdx, p.Name, p.Tricks)
+		}
+	}
+
+	if roleCounts["melder"] != 1 {
+		t.Errorf("expected[%d]: melder count = %d, want 1", expIdx, roleCounts["melder"])
+	}
+	switch melding.Type {
+	case db.MeldingTypeNormal:
+		if roleCounts["makker"] != 1 {
+			t.Errorf("expected[%d]: makker count = %d, want 1 for normal melding", expIdx, roleCounts["makker"])
+		}
+		if roleCounts["modspil"] != 2 {
+			t.Errorf("expected[%d]: modspil count = %d, want 2 for normal melding", expIdx, roleCounts["modspil"])
+		}
+	case db.MeldingTypeNolo:
+		if roleCounts["makker"] > 1 {
+			t.Errorf("expected[%d]: makker count = %d, want at most 1 for nolo", expIdx, roleCounts["makker"])
+		}
+		if got, want := roleCounts["modspil"], 3-roleCounts["makker"]; got != want {
+			t.Errorf("expected[%d]: modspil count = %d, want %d for nolo", expIdx, got, want)
+		}
+	default:
+		t.Errorf("expected[%d]: unknown melding type %q", expIdx, melding.Type)
+	}
+
+	if e.MeldSideSum != dontCheck && (e.MeldSideSum < 0 || e.MeldSideSum > 13) {
+		t.Errorf("expected[%d]: meld-side sum = %d, want 0..13 or dontCheck", expIdx, e.MeldSideSum)
+	}
+	if e.ModspilSum != dontCheck && (e.ModspilSum < 0 || e.ModspilSum > 13) {
+		t.Errorf("expected[%d]: modspil sum = %d, want 0..13 or dontCheck", expIdx, e.ModspilSum)
+	}
+	if e.MeldSideSum != dontCheck && e.ModspilSum != dontCheck && e.MeldSideSum+e.ModspilSum != 13 {
+		t.Errorf("expected[%d]: trick sums = %d + %d, want 13", expIdx, e.MeldSideSum, e.ModspilSum)
+	}
 }
 
 // gameSignature canonicalises a game as "melding|name=role,name=role,...".

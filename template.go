@@ -36,6 +36,8 @@ func render(tplName string, w http.ResponseWriter, data any, files ...string) er
 			}
 			return s
 		},
+		"money":       formatMoney,
+		"amountInput": formatAmountInput,
 		"roleIcon": func(role string) string {
 			switch role {
 			case "melder":
@@ -88,6 +90,15 @@ func render(tplName string, w http.ResponseWriter, data any, files ...string) er
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	return tpl.ExecuteTemplate(w, tplName, data)
+}
+
+func formatMoney(cents int) string {
+	sign := ""
+	if cents < 0 {
+		sign = "-"
+		cents = -cents
+	}
+	return fmt.Sprintf("%s%d,%02d kr.", sign, cents/100, cents%100)
 }
 
 func roleLabel(role string) string {

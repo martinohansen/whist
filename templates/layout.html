@@ -40,6 +40,7 @@
           <div class="nav-links">
             <a href="/c/{{.Club.ID}}{{.SeasonQuery}}" {{if eq .Path (printf "/c/%s" .Club.ID)}}class="active"{{end}}>Stilling</a>
             <a href="/c/{{.Club.ID}}/games{{.SeasonQuery}}" {{if eq .Path (printf "/c/%s/games" .Club.ID)}}class="active"{{end}}>Spil</a>
+            <a href="/c/{{.Club.ID}}/settlements{{.SeasonQuery}}" {{if eq .Path (printf "/c/%s/settlements" .Club.ID)}}class="active"{{end}}>Afregn</a>
             <a href="/c/{{.Club.ID}}/settings{{.SeasonQuery}}" {{if eq .Path (printf "/c/%s/settings" .Club.ID)}}class="active"{{end}}>Klubben</a>
           </div>
           <div class="nav-right">

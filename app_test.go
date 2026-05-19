@@ -142,13 +142,379 @@ func TestCreateClubAndVisitAllPages(t *testing.T) {
 
 	id := createClub(t, h, "Testklub")
 
-	for _, path := range []string{"", "games", "new", "settings"} {
+	for _, path := range []string{"", "games", "settlements", "new", "settings"} {
 		p := "/c/" + id
 		if path != "" {
 			p += "/" + path
 		}
 		rec := get(t, h, p)
 		assertStatus(t, rec, http.StatusOK)
+	}
+}
+
+func TestSettlementsPageRendersPreviewValidationTotalsAndHistory(t *testing.T) {
+	app, store := newTestApp(t)
+	h := app.routes()
+	id := createClub(t, h, "Testklub")
+	if err := store.AddSeason(id, "Maj", "2026-05-01", "2026-05-31"); err != nil {
+		t.Fatal(err)
+	}
+	seasons, err := store.ListSeasons(id)
+	if err != nil || len(seasons) != 1 {
+		t.Fatalf("list seasons: err=%v len=%d", err, len(seasons))
+	}
+	var players []db.Player
+	for _, name := range []string{"Anna", "Bo", "Carl", "Dorthe"} {
+		player, err := store.AddPlayer(id, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		players = append(players, player)
+	}
+	meldings, err := store.ListMeldings(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddGame(id, mustDate(t, "2026-05-10"), meldings[0], []game.PlayerEntry{
+		{PlayerID: players[0].ID, Role: "melder", Tricks: 4},
+		{PlayerID: players[1].ID, Role: "makker", Tricks: 3},
+		{PlayerID: players[2].ID, Role: "modspil", Tricks: 3},
+		{PlayerID: players[3].ID, Role: "modspil", Tricks: 3},
+	}, "i valgt periode"); err != nil {
+		t.Fatal(err)
+	}
+
+	seasonID := itoa(seasons[0].ID)
+	rec := get(t, h, "/c/"+id+"/settlements?season="+seasonID+"&type=points&amount=400,00")
+	assertStatus(t, rec, http.StatusOK)
+	body := rec.Body.String()
+	for _, want := range []string{
+		`>Spil</a>`,
+		`>Afregn</a>`,
+		`>Klubben</a>`,
+		`href="/c/` + id + `/settlements?season=` + seasonID + `"`,
+		`Pointafregning`,
+		`200,00 kr.`,
+		`-200,00 kr.`,
+		`Bogfør`,
+		`Fra spil #`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("settlements page missing %q: %s", want, body)
+		}
+	}
+	if !(strings.Index(body, ">Spil</a>") < strings.Index(body, ">Afregn</a>") &&
+		strings.Index(body, ">Afregn</a>") < strings.Index(body, ">Klubben</a>")) {
+		t.Fatalf("settlement nav is not between games and settings: %s", body)
+	}
+
+	rec = get(t, h, "/c/"+id+"/settlements?type=points&amount=ugyldigt")
+	assertStatus(t, rec, http.StatusOK)
+	if !strings.Contains(rec.Body.String(), "Beløbet skal være et positivt tal") {
+		t.Fatalf("missing amount validation: %s", rec.Body.String())
+	}
+
+	rec = post(t, h, "/c/"+id+"/settlements/book", url.Values{
+		"type":   {"points"},
+		"amount": {"400,00"},
+		"season": {seasonID},
+	})
+	assertStatus(t, rec, http.StatusSeeOther)
+	if got, want := rec.Header().Get("Location"), "/c/"+id+"/settlements?season="+seasonID; got != want {
+		t.Fatalf("redirect=%q want %q", got, want)
+	}
+
+	rec = get(t, h, "/c/"+id+"/settlements")
+	assertStatus(t, rec, http.StatusOK)
+	body = rec.Body.String()
+	for _, want := range []string{
+		`Total`,
+		`Samlet bogført i den valgte periode: 400,00 kr.`,
+		`Historik`,
+		`Pointafregning`,
+		`fra spil #`,
+		`400,00 kr.`,
+		`Ingen endnu ikke bogførte spil.`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("settlement history missing %q: %s", want, body)
+		}
+	}
+}
+
+func TestBookSettlementRejectsWithoutUnsettledGames(t *testing.T) {
+	app, _ := newTestApp(t)
+	h := app.routes()
+	id := createClub(t, h, "Testklub")
+
+	rec := post(t, h, "/c/"+id+"/settlements/book", url.Values{
+		"type":   {"points"},
+		"amount": {"400,00"},
+	})
+	assertStatus(t, rec, http.StatusOK)
+	if !strings.Contains(rec.Body.String(), "Der er ingen endnu ikke afregnede spil.") {
+		t.Fatalf("missing no-games validation: %s", rec.Body.String())
+	}
+}
+
+func TestSettlementsHistoryAndTotalsFollowSelectedSeason(t *testing.T) {
+	app, store := newTestApp(t)
+	h := app.routes()
+	id := createClub(t, h, "Testklub")
+	if err := store.AddSeason(id, "Januar", "2026-01-01", "2026-01-31"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddSeason(id, "Maj", "2026-05-01", "2026-05-31"); err != nil {
+		t.Fatal(err)
+	}
+	seasons, err := store.ListSeasons(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seasonByName := map[string]int{}
+	for _, season := range seasons {
+		seasonByName[season.Name] = season.ID
+	}
+	var players []db.Player
+	for _, name := range []string{"Anna", "Bo", "Carl", "Dorthe"} {
+		player, err := store.AddPlayer(id, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		players = append(players, player)
+	}
+	meldings, err := store.ListMeldings(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := []game.PlayerEntry{
+		{PlayerID: players[0].ID, Role: "melder", Tricks: 4},
+		{PlayerID: players[1].ID, Role: "makker", Tricks: 3},
+		{PlayerID: players[2].ID, Role: "modspil", Tricks: 3},
+		{PlayerID: players[3].ID, Role: "modspil", Tricks: 3},
+	}
+	janID, err := store.AddGame(id, mustDate(t, "2026-01-10"), meldings[0], entries, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := post(t, h, "/c/"+id+"/settlements/book", url.Values{
+		"type":            {"points"},
+		"amount":          {"100,00"},
+		"through_game_id": {itoa(janID)},
+	})
+	assertStatus(t, rec, http.StatusSeeOther)
+
+	mayID, err := store.AddGame(id, mustDate(t, "2026-05-10"), meldings[0], entries, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec = post(t, h, "/c/"+id+"/settlements/book", url.Values{
+		"type":            {"points"},
+		"amount":          {"300,00"},
+		"through_game_id": {itoa(mayID)},
+	})
+	assertStatus(t, rec, http.StatusSeeOther)
+
+	rec = get(t, h, "/c/"+id+"/settlements?season="+itoa(seasonByName["Januar"]))
+	assertStatus(t, rec, http.StatusOK)
+	body := rec.Body.String()
+	for _, want := range []string{
+		"Samlet bogført i den valgte periode: 100,00 kr.",
+		"fra spil #" + itoa(janID) + " 2026-01-10",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("January settlement view missing %q: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "fra spil #"+itoa(mayID)+" 2026-05-10") {
+		t.Fatalf("January settlement view includes May settlement: %s", body)
+	}
+
+	rec = get(t, h, "/c/"+id+"/settlements?season="+itoa(seasonByName["Maj"]))
+	assertStatus(t, rec, http.StatusOK)
+	body = rec.Body.String()
+	for _, want := range []string{
+		"Samlet bogført i den valgte periode: 300,00 kr.",
+		"fra spil #" + itoa(mayID) + " 2026-05-10",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("May settlement view missing %q: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "fra spil #"+itoa(janID)+" 2026-01-10") {
+		t.Fatalf("May settlement view includes January settlement: %s", body)
+	}
+}
+
+func TestSettlementCutoffLeavesLaterGamesAndUsesClubDefaults(t *testing.T) {
+	app, store := newTestApp(t)
+	h := app.routes()
+	id := createClub(t, h, "Testklub")
+	var players []db.Player
+	for _, name := range []string{"Anna", "Bo", "Carl", "Dorthe"} {
+		player, err := store.AddPlayer(id, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		players = append(players, player)
+	}
+	meldings, err := store.ListMeldings(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{
+		"name":                      {"Testklub"},
+		"rules":                     {""},
+		"default_settlement_type":   {"points"},
+		"default_settlement_amount": {"123,45"},
+		"common_debt_equal_percent": {"50"},
+		"visibility":                {"private"},
+	}
+	for _, melding := range meldings {
+		form.Add("melding_id", itoa(melding.ID))
+		form.Add("melding_name", melding.Name)
+		form.Add("melding_type", melding.Type)
+		form.Add("melding_bid", itoa(melding.Bid))
+		form.Add("melding_points", itoa(melding.Points))
+	}
+	rec := post(t, h, "/c/"+id+"/settings/save", form)
+	assertStatus(t, rec, http.StatusOK)
+
+	entries := []game.PlayerEntry{
+		{PlayerID: players[0].ID, Role: "melder", Tricks: 4},
+		{PlayerID: players[1].ID, Role: "makker", Tricks: 3},
+		{PlayerID: players[2].ID, Role: "modspil", Tricks: 3},
+		{PlayerID: players[3].ID, Role: "modspil", Tricks: 3},
+	}
+	firstID, err := store.AddGame(id, mustDate(t, "2026-05-10"), meldings[0], entries, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID, err := store.AddGame(id, mustDate(t, "2026-05-11"), meldings[0], entries, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec = get(t, h, "/c/"+id+"/settlements?type=common_debt&amount=400,00&through_game_id="+itoa(firstID))
+	assertStatus(t, rec, http.StatusOK)
+	body := rec.Body.String()
+	for _, want := range []string{
+		`option value="` + itoa(firstID) + `" selected`,
+		`option value="` + itoa(secondID) + `"`,
+		`50% deles ligeligt; resten fordeles efter afstand til vinderen.`,
+		`Fra spil #` + itoa(firstID) + ` 2026-05-10 til #` + itoa(firstID) + ` 2026-05-10`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("cutoff preview missing %q: %s", want, body)
+		}
+	}
+
+	rec = post(t, h, "/c/"+id+"/settlements/book", url.Values{
+		"type":            {"common_debt"},
+		"amount":          {"400,00"},
+		"through_game_id": {itoa(firstID)},
+	})
+	assertStatus(t, rec, http.StatusSeeOther)
+
+	rec = get(t, h, "/c/"+id+"/settlements")
+	assertStatus(t, rec, http.StatusOK)
+	body = rec.Body.String()
+	for _, want := range []string{
+		`<option value="points" selected>Pointafregning</option>`,
+		`value="123,45"`,
+		`option value="` + itoa(secondID) + `" selected`,
+		`Fra spil #` + itoa(secondID) + ` 2026-05-11 til #` + itoa(secondID) + ` 2026-05-11`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("remembered defaults missing %q: %s", want, body)
+		}
+	}
+}
+
+func TestSettingsSavePersistsCommonDebtEqualPercent(t *testing.T) {
+	app, store := newTestApp(t)
+	h := app.routes()
+	id := createClub(t, h, "Testklub")
+	var players []db.Player
+	for _, name := range []string{"Anna", "Bo", "Carl", "Dorthe"} {
+		player, err := store.AddPlayer(id, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		players = append(players, player)
+	}
+	meldings, err := store.ListMeldings(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddGame(id, mustDate(t, "2026-05-10"), meldings[0], []game.PlayerEntry{
+		{PlayerID: players[0].ID, Role: "melder", Tricks: 4},
+		{PlayerID: players[1].ID, Role: "makker", Tricks: 3},
+		{PlayerID: players[2].ID, Role: "modspil", Tricks: 3},
+		{PlayerID: players[3].ID, Role: "modspil", Tricks: 3},
+	}, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := get(t, h, "/c/"+id+"/settings")
+	assertStatus(t, rec, http.StatusOK)
+	body := rec.Body.String()
+	if !strings.Contains(body, `name="common_debt_equal_percent"`) {
+		t.Fatalf("settings missing common debt field: %s", body)
+	}
+	if !strings.Contains(body, `name="default_settlement_type"`) || !strings.Contains(body, `name="default_settlement_amount"`) {
+		t.Fatalf("settings missing settlement defaults: %s", body)
+	}
+	if !strings.Contains(body, "Resten fordeles efter hvor langt hver spiller er fra periodens vinder.") {
+		t.Fatalf("settings missing common debt explanation: %s", body)
+	}
+	if !strings.Contains(body, "Eksempel med nuværende stilling") {
+		t.Fatalf("settings missing common debt example: %s", body)
+	}
+	if !(strings.Index(body, "Offentlige klubber kræver") < strings.Index(body, "Regler")) {
+		t.Fatalf("visibility was not moved under Klub before Regler: %s", body)
+	}
+	if !(strings.Index(body, `id="vis-private"`) < strings.Index(body, `id="vis-public"`)) {
+		t.Fatalf("visibility toggle order was not swapped: %s", body)
+	}
+	form := url.Values{
+		"name":                      {"Testklub"},
+		"rules":                     {""},
+		"default_settlement_type":   {"points"},
+		"default_settlement_amount": {"123,45"},
+		"common_debt_equal_percent": {"75"},
+		"visibility":                {"private"},
+	}
+	for _, melding := range meldings {
+		form.Add("melding_id", itoa(melding.ID))
+		form.Add("melding_name", melding.Name)
+		form.Add("melding_type", melding.Type)
+		form.Add("melding_bid", itoa(melding.Bid))
+		form.Add("melding_points", itoa(melding.Points))
+	}
+	rec = post(t, h, "/c/"+id+"/settings/save", form)
+	assertStatus(t, rec, http.StatusOK)
+	club, err := store.GetClub(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := club.CommonDebtEqualPercent, 75; got != want {
+		t.Fatalf("common debt equal percent=%d want %d", got, want)
+	}
+	if got, want := club.DefaultSettlementType, "points"; got != want {
+		t.Fatalf("default settlement type=%q want %q", got, want)
+	}
+	if got, want := club.DefaultSettlementAmountCents, 12345; got != want {
+		t.Fatalf("default settlement amount=%d want %d", got, want)
+	}
+	rec = get(t, h, "/c/"+id+"/settings")
+	assertStatus(t, rec, http.StatusOK)
+	body = rec.Body.String()
+	if !strings.Contains(body, `id="common-debt-equal-field"`) ||
+		!strings.Contains(body, `is-disabled`) ||
+		!strings.Contains(body, `id="common-debt-equal-percent"`) ||
+		!strings.Contains(body, `disabled`) {
+		t.Fatalf("common debt share was not disabled for point settlement: %s", body)
 	}
 }
 

@@ -20,12 +20,15 @@ type Store struct {
 }
 
 type Club struct {
-	ID         string
-	Name       string
-	Emoji      string
-	Rules      string
-	PasswordOn bool // true if password_hash is set
-	CreatedAt  time.Time
+	ID                           string
+	Name                         string
+	Emoji                        string
+	Rules                        string
+	DefaultSettlementType        string
+	DefaultSettlementAmountCents int
+	CommonDebtEqualPercent       int
+	PasswordOn                   bool // true if password_hash is set
+	CreatedAt                    time.Time
 }
 
 type Player struct {
@@ -105,6 +108,9 @@ CREATE TABLE IF NOT EXISTS clubs (
 	name TEXT NOT NULL,
 	emoji TEXT NOT NULL DEFAULT '🃏',
 	rules TEXT NOT NULL DEFAULT '',
+	default_settlement_type TEXT NOT NULL DEFAULT 'common_debt',
+	default_settlement_amount_cents INTEGER NOT NULL DEFAULT 40000,
+	common_debt_equal_percent INTEGER NOT NULL DEFAULT 50,
 	password_hash TEXT NOT NULL DEFAULT '',
 	created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -161,6 +167,28 @@ CREATE TABLE IF NOT EXISTS game_scores (
 
 CREATE INDEX IF NOT EXISTS game_scores_player_idx ON game_scores(player_id);
 
+CREATE TABLE IF NOT EXISTS settlements (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	club_id TEXT NOT NULL REFERENCES clubs(id) ON DELETE CASCADE,
+	type TEXT NOT NULL,
+	amount_cents INTEGER NOT NULL,
+	from_game_id INTEGER NOT NULL,
+	through_game_id INTEGER NOT NULL,
+	created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS settlements_club_idx ON settlements(club_id, id DESC);
+
+CREATE TABLE IF NOT EXISTS settlement_rows (
+	settlement_id INTEGER NOT NULL REFERENCES settlements(id) ON DELETE CASCADE,
+	player_id INTEGER NOT NULL,
+	player_name TEXT NOT NULL,
+	player_emoji TEXT NOT NULL DEFAULT '',
+	points INTEGER NOT NULL,
+	amount_cents INTEGER NOT NULL,
+	PRIMARY KEY (settlement_id, player_id)
+);
+
 CREATE TABLE IF NOT EXISTS seasons (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	club_id TEXT NOT NULL REFERENCES clubs(id) ON DELETE CASCADE,
@@ -197,6 +225,57 @@ CREATE TABLE IF NOT EXISTS game_draft_scores (
 `
 	if _, err := db.Exec(schema); err != nil {
 		return err
+	}
+	if err := ensureClubColumns(db); err != nil {
+		return err
+	}
+	return nil
+}
+
+func ensureClubColumns(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(clubs)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	hasDefaultSettlementType := false
+	hasDefaultSettlementAmountCents := false
+	hasCommonDebtEqualPercent := false
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == "common_debt_equal_percent" {
+			hasCommonDebtEqualPercent = true
+		}
+		if name == "default_settlement_type" {
+			hasDefaultSettlementType = true
+		}
+		if name == "default_settlement_amount_cents" {
+			hasDefaultSettlementAmountCents = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if !hasDefaultSettlementType {
+		if _, err := db.Exec(`ALTER TABLE clubs ADD COLUMN default_settlement_type TEXT NOT NULL DEFAULT 'common_debt'`); err != nil {
+			return err
+		}
+	}
+	if !hasDefaultSettlementAmountCents {
+		if _, err := db.Exec(`ALTER TABLE clubs ADD COLUMN default_settlement_amount_cents INTEGER NOT NULL DEFAULT 40000`); err != nil {
+			return err
+		}
+	}
+	if !hasCommonDebtEqualPercent {
+		if _, err := db.Exec(`ALTER TABLE clubs ADD COLUMN common_debt_equal_percent INTEGER NOT NULL DEFAULT 50`); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -259,8 +338,12 @@ func (s *Store) CreateClub(name string) (Club, error) {
 func (s *Store) GetClub(id string) (Club, error) {
 	var c Club
 	var hash string
-	err := s.db.QueryRow(`SELECT id, name, emoji, rules, password_hash, created_at FROM clubs WHERE id = ?`, id).
-		Scan(&c.ID, &c.Name, &c.Emoji, &c.Rules, &hash, &c.CreatedAt)
+	err := s.db.QueryRow(`
+		SELECT id, name, emoji, rules, default_settlement_type, default_settlement_amount_cents,
+			common_debt_equal_percent, password_hash, created_at
+		FROM clubs WHERE id = ?`, id).
+		Scan(&c.ID, &c.Name, &c.Emoji, &c.Rules, &c.DefaultSettlementType, &c.DefaultSettlementAmountCents,
+			&c.CommonDebtEqualPercent, &hash, &c.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Club{}, ErrNotFound
 	}
@@ -320,7 +403,8 @@ func (s *Store) SearchClubs(query string) ([]Club, error) {
 		return nil, nil
 	}
 	rows, err := s.db.Query(`
-		SELECT id, name, emoji, rules, password_hash, created_at
+		SELECT id, name, emoji, rules, default_settlement_type, default_settlement_amount_cents,
+			common_debt_equal_percent, password_hash, created_at
 		FROM clubs
 		WHERE password_hash != ''
 		  AND name LIKE ? COLLATE NOCASE
@@ -334,7 +418,8 @@ func (s *Store) SearchClubs(query string) ([]Club, error) {
 	for rows.Next() {
 		var c Club
 		var hash string
-		if err := rows.Scan(&c.ID, &c.Name, &c.Emoji, &c.Rules, &hash, &c.CreatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.Name, &c.Emoji, &c.Rules, &c.DefaultSettlementType, &c.DefaultSettlementAmountCents,
+			&c.CommonDebtEqualPercent, &hash, &c.CreatedAt); err != nil {
 			return nil, err
 		}
 		c.PasswordOn = hash != ""

@@ -62,6 +62,13 @@ type Store interface {
 	UpdateGame(clubID string, id int, playedAt time.Time, m db.Melding, scores []game.PlayerEntry, note string) error
 	DeleteGame(clubID string, id int) error
 
+	// Settlements
+	LatestSettlement(clubID string) (db.Settlement, bool, error)
+	SettlementGamesSince(clubID string, afterGameID int) ([]db.Game, error)
+	SettlementPointsBetween(clubID string, afterGameID, throughGameID int) ([]db.SettlementPoint, error)
+	AddSettlement(clubID string, settlement db.Settlement) (db.Settlement, error)
+	ListSettlements(clubID string) ([]db.Settlement, error)
+
 	// Drafts (paper-import flow)
 	AddDrafts(clubID, batchID string, drafts []db.Draft) error
 	ListPendingDrafts(clubID string) ([]db.Draft, error)
@@ -200,6 +207,10 @@ func (a *App) handleClubRoute(w http.ResponseWriter, r *http.Request) {
 		a.handleLeaderboard(w, r, club)
 	case sub == "games":
 		a.handleGames(w, r, club)
+	case sub == "settlements":
+		a.handleSettlements(w, r, club)
+	case sub == "settlements/book":
+		a.handleBookSettlement(w, r, club)
 	case sub == "new":
 		a.handleNewGame(w, r, club)
 	case sub == "players/add":

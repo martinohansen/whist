@@ -12,8 +12,11 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/martinohansen/whist/internal/db"
 )
@@ -24,6 +27,9 @@ const (
 	chatModel   = "mistral-large-latest"
 	defaultMime = "image/jpeg"
 )
+
+var integerPattern = regexp.MustCompile(`\d+`)
+var signedResultPattern = regexp.MustCompile(`(^|[^0-9])([+-][0-9]+)`)
 
 // Client is a thin Mistral HTTP client.
 type Client struct {
@@ -56,6 +62,25 @@ type DraftPlayer struct {
 	Name   string `json:"name"`
 	Role   string `json:"role"`
 	Tricks int    `json:"tricks"`
+}
+
+type parsedNote struct {
+	Summary             string              `json:"summary"`
+	NotationAssumptions []string            `json:"notation_assumptions"`
+	PlayerAliases       []parsedPlayerAlias `json:"player_aliases"`
+	Rows                []parsedRow         `json:"rows"`
+}
+
+type parsedPlayerAlias struct {
+	Alias string `json:"alias"`
+	Name  string `json:"name"`
+}
+
+type parsedRow struct {
+	SourceRow string    `json:"source_row"`
+	Decision  string    `json:"decision"`
+	Reason    string    `json:"reason"`
+	Game      DraftGame `json:"game"`
 }
 
 // OCR sends a single image to Mistral's OCR endpoint and returns the
@@ -99,27 +124,56 @@ func (c *Client) OCR(ctx context.Context, img []byte, mime string) (string, erro
 // games. Existing meldings and players are passed so the LLM picks matching
 // names verbatim.
 func (c *Client) Extract(ctx context.Context, markdown string, meldings []db.Melding, players []db.Player) ([]DraftGame, error) {
+	parsed, err := c.parseNote(ctx, markdown, meldings, players)
+	if err != nil {
+		return nil, err
+	}
+	games, validationErrors := validateParsedNote(markdown, parsed, meldings, players)
+	if len(validationErrors) == 0 {
+		slog.DebugContext(ctx, "mistral.extract validated", "games", len(games))
+		return games, nil
+	}
+
+	slog.DebugContext(ctx, "mistral.extract validation failed",
+		"errors", validationErrors,
+		"parsed", parsed,
+	)
+	repaired, err := c.repairNote(ctx, markdown, parsed, validationErrors, meldings, players)
+	if err != nil {
+		return nil, err
+	}
+	games, validationErrors = validateParsedNote(markdown, repaired, meldings, players)
+	if len(validationErrors) != 0 {
+		return nil, fmt.Errorf("mistral: validated extraction failed after repair: %s", validationSummary(validationErrors))
+	}
+	slog.DebugContext(ctx, "mistral.extract repair validated", "games", len(games))
+	return games, nil
+}
+
+func (c *Client) parseNote(ctx context.Context, markdown string, meldings []db.Melding, players []db.Player) (parsedNote, error) {
 	system := buildSystemPrompt(meldings, players)
-	slog.DebugContext(ctx, "mistral.extract request",
+	user := buildParseUserContent(markdown)
+	slog.DebugContext(ctx, "mistral.parse request",
 		"model", chatModel,
 		"meldings", len(meldings),
 		"players", len(players),
 		"markdown_bytes", len(markdown),
 		"system_prompt", system,
-		"user_markdown", markdown,
+		"user_content", user,
 	)
 	body := map[string]any{
-		"model": chatModel,
+		"model":       chatModel,
+		"temperature": 0,
 		"messages": []map[string]any{
 			{"role": "system", "content": system},
-			{"role": "user", "content": markdown},
+			{"role": "user", "content": user},
 		},
 		"response_format": map[string]any{
 			"type": "json_schema",
 			"json_schema": map[string]any{
-				"name":   "draft_games",
+				"name":   "parsed_whist_note",
 				"strict": true,
-				"schema": draftSchema(),
+				"schema": parsedNoteSchema(),
 			},
 		},
 	}
@@ -131,120 +185,786 @@ func (c *Client) Extract(ctx context.Context, markdown string, meldings []db.Mel
 		} `json:"choices"`
 	}
 	if err := c.postJSON(ctx, "/chat/completions", body, &resp); err != nil {
-		return nil, err
+		return parsedNote{}, err
 	}
 	if len(resp.Choices) == 0 {
-		return nil, fmt.Errorf("mistral: no choices in response")
+		return parsedNote{}, fmt.Errorf("mistral: no choices in parse response")
 	}
 	raw := resp.Choices[0].Message.Content
-	slog.DebugContext(ctx, "mistral.extract response", "raw_content", raw)
-	var wrapper struct {
-		Games []DraftGame `json:"games"`
+	slog.DebugContext(ctx, "mistral.parse response", "raw_content", raw)
+	var parsed parsedNote
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		return parsedNote{}, fmt.Errorf("mistral: parse structured note: %w", err)
 	}
-	if err := json.Unmarshal([]byte(raw), &wrapper); err != nil {
-		return nil, fmt.Errorf("mistral: parse draft games: %w", err)
+	slog.DebugContext(ctx, "mistral.parse parsed", "rows", len(parsed.Rows))
+	return parsed, nil
+}
+
+func (c *Client) repairNote(ctx context.Context, markdown string, parsed parsedNote, validationErrors []string, meldings []db.Melding, players []db.Player) (parsedNote, error) {
+	system := buildRepairPrompt(meldings, players)
+	previous, err := json.Marshal(parsed)
+	if err != nil {
+		return parsedNote{}, err
 	}
-	slog.DebugContext(ctx, "mistral.extract parsed", "games", len(wrapper.Games))
-	return wrapper.Games, nil
+	user := fmt.Sprintf("Original markdown:\n%s\n\nMeaningful source rows that must be copied exactly when used as source_row:\n%s\n\nPrevious structured parse:\n%s\n\nValidation errors to fix:\n%s",
+		markdown,
+		sourceRowsForPrompt(markdown),
+		string(previous),
+		strings.Join(validationErrors, "\n"),
+	)
+	slog.DebugContext(ctx, "mistral.repair request",
+		"model", chatModel,
+		"meldings", len(meldings),
+		"players", len(players),
+		"markdown_bytes", len(markdown),
+		"validation_errors", validationErrors,
+		"system_prompt", system,
+	)
+	body := map[string]any{
+		"model":       chatModel,
+		"temperature": 0,
+		"messages": []map[string]any{
+			{"role": "system", "content": system},
+			{"role": "user", "content": user},
+		},
+		"response_format": map[string]any{
+			"type": "json_schema",
+			"json_schema": map[string]any{
+				"name":   "repaired_whist_note",
+				"strict": true,
+				"schema": parsedNoteSchema(),
+			},
+		},
+	}
+	var resp struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := c.postJSON(ctx, "/chat/completions", body, &resp); err != nil {
+		return parsedNote{}, err
+	}
+	if len(resp.Choices) == 0 {
+		return parsedNote{}, fmt.Errorf("mistral: no choices in repair response")
+	}
+	raw := resp.Choices[0].Message.Content
+	slog.DebugContext(ctx, "mistral.repair response", "raw_content", raw)
+	var repaired parsedNote
+	if err := json.Unmarshal([]byte(raw), &repaired); err != nil {
+		return parsedNote{}, fmt.Errorf("mistral: parse repaired note: %w", err)
+	}
+	return repaired, nil
+}
+
+func buildParseUserContent(markdown string) string {
+	return fmt.Sprintf("Original markdown:\n%s\n\nMeaningful source rows that must be accounted for as game, skip, or ambiguous. Copy these exactly when they are used as source_row:\n%s",
+		markdown,
+		sourceRowsForPrompt(markdown),
+	)
+}
+
+func sourceRowsForPrompt(markdown string) string {
+	rows := meaningfulSourceRows(markdown)
+	if len(rows) == 0 {
+		return "(none)"
+	}
+	var b strings.Builder
+	for _, row := range rows {
+		fmt.Fprintf(&b, " - %s\n", row)
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func buildSystemPrompt(meldings []db.Melding, players []db.Player) string {
 	var b strings.Builder
-	b.WriteString(`Du er en assistent der konverterer en håndskrevet whist-scoreseddel til struktureret JSON.
+	b.WriteString(`You convert a handwritten whist score note into structured JSON.
 
-Inputtet er markdown udtrukket af OCR fra et foto. Sedlen kan være skrevet på mange måder: tabeller, bullets, prosa, forkortelser, initialer, kolonner — der findes ikke ét fast format. Læs sedlen og udled hvad hvert spil siger.
+Read the whole note before resolving individual rows. Infer the note-local notation: aliases, separators, role markers, repeated row patterns, field order, and the meaning of numeric positions. Apply one consistent note-local interpretation wherever the note supports it.
 
-WHIST-DOMÆNE (det skal du forudsætte):
- - Et spil har én melding, én melder, eventuelt én eller flere makkere, og resten af deltagerne er modspil.
- - Normal melding (et tal-bid): melder + makker spiller sammen mod modspil. Papiret skriver typisk hvor mange stik melde-siden vandt. Sum af stik over alle spillere = 13.
- - Nolo (Sol, Ren sol, og lignende): melder spiller alene eller med en valgfri makker mod resten. Papiret skriver typisk hvor mange stik melder (og makker, hvis nogen) fik. Sum af stik = 13.
+Use only the supplied club player list and club melding list as source of truth. Player names and melding names in game rows must be copied exactly from those lists. Do not invent names, combine names, or turn a pair of players into one player.
 
-KRITISK — BID vs STIK:
- - "Bid" er hvad melde-siden meldte; "stik" er hvad de faktisk vandt. De er to forskellige tal.
- - Et spil har næsten altid to tal: et bid og et stik. De kan stå adskilt af "→", "->", "-", "/", ":", "=", komma, mellemrum, "fik", "→ fik", osv. Næsten universelt: det FØRSTE tal er bid, det ANDET er stik.
- - Bid er typisk meldingens navn (7-13 for normale, ord for nolo). Hvis du har valgt en melding "9" så er "9" bid'et — fortolk IKKE 9-tallet også som stik.
- - For normal melding skal melder+makker tricks summere til STIK-tallet (det andet tal), ikke til bid'et. Modspil-summen er 13 - stik.
+Aliases are note-local and literal. If two player aliases share a prefix, use the alias token that is actually written; do not expand a short written token into a longer alias. For compact player text without separators, split the written player part into a one-to-one sequence of supported aliases that exactly covers the written characters.
 
-MELDING-MATCHING:
- - Tal-bid (7, 8, 9, …) matches mod meldingen med samme .Bid-værdi i klubbens liste.
- - "sol", "solo", "Sol" (uden "ren") matches mod meldingen "Sol".
- - "ren sol", "ren solo" matches mod meldingen "Ren sol".
- - Hvis du er i tvivl mellem Sol og Ren sol, vælg Sol; vælg kun Ren sol når ordet "ren" eksplicit står skrevet.
+Whist invariants:
+ - A game has four unique players.
+ - Roles are melder, optional makker, and modspil.
+ - Normal meldings have exactly one melder, one makker, and two modspil.
+ - Nolo meldings have exactly one melder, zero or one makker, and the remaining players as modspil.
+ - Tricks are integers from 0 to 13 and sum to 13 for the game.
+ - The melding/bid and the result/trick value are different facts. When a row has both, choose the melding from the first melding/bid token and choose tricks from the later result/trick token.
+ - For a normal melding, a single result usually means the melder+makker team trick total. Assign melder+makker tricks so their sum equals that result, not the bid.
+ - For a normal melding with a signed result, compute the team trick total as the melding bid plus the signed delta; equality means the team trick total equals the bid.
+ - For a repeated row pattern with two numeric positions, infer once which position is the melding/bid and which is the result/trick value, then apply that consistently to every row with that pattern.
+ - For a nolo, a numeric or textual melding token identifies the nolo. Later trick values are outcomes and must not rematch the row to a different nolo.
+ - For numeric nolo notation, match the written melding token to the nolo whose club-list bid equals that token. Do not choose a nolo because its bid equals a later trick/result value.
+ - For textual nolo notation, the club-list bid is only the melding threshold. Do not use that bid as a player's trick count unless the note writes it as a result value.
+ - For textual nolo notation, match the written text to the club melding name that is actually written. Do not upgrade a shorter written nolo name to a longer club nolo name unless the extra words are present in the source row.
+ - For a nolo row that names two nolo-side players, the first is melder and the second is makker unless the note explicitly says otherwise.
+ - For a nolo with separate player trick values, keep those values with the written players in order.
+ - For numeric nolo notation with two later trick values, the nolo numeric token is only the melding. The later values are the melder and makker tricks in written player order.
 
-UDLEDNING fra sedlen:
- - Identificér for hvert spil: melding, hvem der er melder, hvem der evt. er makker, hvad det skrevne stik-tal henviser til (hold-total for normal melding; individuelle tal for nolo).
- - For nolo med makker viser papiret typisk to stik-tal, ét pr. melde-side-spiller (separator: "/", ",", "+", "og", "=N, =N" osv.). Det er ALDRIG en brøk eller et decimaltal — det er to selvstændige heltal i samme rækkefølge som spillerne er nævnt. Eksempel: "K, M sol 1,3" → Katrine fik 1 stik, Martin fik 3 stik (ikke 1+2 og ikke 1.3).
- - Forfattere bruger ofte initialer, forbogstavskombinationer eller fornavne. Resolv dem til fulde navne fra spillerlisten — første unikke prefix-match er normalt det rigtige (fx "M" eller "Ma" → "Martin"). Hvis to spillere starter med samme bogstav, brug længere kontekst eller spring spillet over.
- - Hvis sedlen kun har én skriftlig stik-værdi for normal melding, er det hold-totalen for melde-siden. Modspillets total er da 13 minus dette.
+Notation guidance:
+ - Notes often repeat one compact pattern for many games. Infer the field order from the whole note and apply it consistently.
+ - Separators such as arrows, dashes, slashes, colons, equals signs, commas, spaces, or adjacency are notation. They do not let you ignore a later result value.
+ - In a normal-melding row with two numeric groups after the player part, the first numeric group is the melding/bid and the later numeric group is the melder+makker team trick total.
+ - In compact normal rows written as player-part plus number/number or number-number, read that as bid/result for all rows using that pattern, even when the result is lower than the bid.
+ - If the note gives only a normal team's total tricks and no individual split, put that total on the melder and 0 on the makker. The important invariant is that melder+makker equals the written team total.
+ - If a table has one column per player and row cells contain repeated role markers, infer those marker meanings from the whole table. A marker belongs to the player column where it appears; blank or dash cells are not melding-side players.
+ - Do not mark a terse row ambiguous when it follows a repeated pattern already resolved elsewhere on the same note.
 
-OUTPUT-SKEMA pr. spil:
- - "melding_name": præcis ét navn fra klubbens meldingsliste (case-sensitive).
- - "players": ét element pr. spiller der deltog. Klubben har som regel et fast antal spillere ved bordet (4); hvis sedlen tydeligt viser sit-outs, så medtag kun de spillende.
-   * "name": fuldt navn fra spillerlisten (ikke initial).
-   * "role": "melder", "makker" eller "modspil".
-   * "tricks": antal stik. Sum over et spil = 13.
-     - For normal melding pinner papiret kun hold-totalen; fordel den rimeligt mellem melder/makker (typisk lige eller koncentreret hos melder hvis konteksten antyder det) og resten ligeligt mellem modspillerne, så summerne stemmer.
-     - For nolo med eksplicitte individuelle tal: brug dem direkte; fordel resten af 13 mellem modspillerne.
- - "played_at": "YYYY-MM-DD" hvis tydelig dato findes på sedlen, ellers tom streng.
- - "note": korte ekstra noter fra sedlen (fx "ærgerligt", "✓"), ellers tom streng.
+Return a structured intermediate parse, not just games:
+ - summary: brief note-level summary.
+ - notation_assumptions: note-local assumptions used for aliases, markers, separators, and numeric positions.
+ - player_aliases: only aliases supported by the note and resolved to one supplied player.
+ - rows: one decision for every meaningful non-empty source row or row group.
 
-Returnér KUN spil hvor du har høj tillid til både melding og rollefordeling. Spring overskrifter, blanke linjer og ulæselige rækker over. Antag ikke spil der ikke står på sedlen.
+Each row decision must be one of:
+ - game: row is a valid game; fill game.
+ - skip: row is a heading, legend, prose with no game, table header, or unreadable non-game row.
+ - ambiguous: row may contain a game but cannot be resolved confidently from the whole note and club data.
+
+For each row, source_row must quote the original row text or row group closely enough that each meaningful source line is accounted for. For multi-line game blocks, use the full block as source_row.
+
+Mark genuinely ambiguous rows as ambiguous instead of guessing. Do not omit a meaningful row silently. Do not add games not present in the note.
 
 `)
+	writeClubContext(&b, meldings, players)
+	return b.String()
+}
+
+func buildRepairPrompt(meldings []db.Melding, players []db.Player) string {
+	var b strings.Builder
+	b.WriteString(`Repair a structured whist note parse so it passes deterministic validation.
+
+Use the original markdown and the validation errors. Keep valid row decisions when possible, but correct any invalid games and add missing row decisions. If a row cannot be resolved confidently after reading the whole note, mark it ambiguous. Return the full corrected structured parse.
+
+Rules for applying validation errors:
+ - Copy source_row values from the provided meaningful source-row list; do not rewrite or normalize them.
+ - If an error says the source row implies normal meld-side tricks N, change the game so melder+makker tricks sum to N and modspil tricks sum to 13-N.
+ - If an error says the source row implies nolo melder or makker tricks N, use those exact trick values for those roles.
+ - If an error says the source row implies a different nolo melding, change melding_name to that exact supplied club melding name.
+ - If a source row writes a shorter nolo name, do not change it to a longer nolo name unless the longer name's extra words are present in source_row.
+ - If an error says a leading or second player token implies a role, change the role assignment to match the token rather than changing the source_row.
+
+`)
+	writeClubContext(&b, meldings, players)
+	return b.String()
+}
+
+func writeClubContext(b *strings.Builder, meldings []db.Melding, players []db.Player) {
 	if len(meldings) > 0 {
-		b.WriteString("Klubbens meldinger (vælg ÉT navn herfra til melding_name):\n")
+		b.WriteString("Club meldings (choose EXACTLY ONE name from this list for melding_name):\n")
 		for _, m := range meldings {
-			fmt.Fprintf(&b, " - %s (type=%s, bid=%d, points=%d)\n", m.Name, m.Type, m.Bid, m.Points)
+			fmt.Fprintf(b, " - %s (type=%s, bid=%d, points=%d)\n", m.Name, m.Type, m.Bid, m.Points)
 		}
-		b.WriteString("\n")
+		writeNoloNumericNotation(b, meldings)
 	}
 	if len(players) > 0 {
-		b.WriteString("Klubbens spillere (vælg ÉT navn herfra til hver player.name):\n")
+		b.WriteString("Club players (choose EXACTLY ONE name from this list for each player.name):\n")
 		for _, p := range players {
 			b.WriteString(" - ")
 			b.WriteString(p.Name)
 			b.WriteString("\n")
 		}
 	}
-	return b.String()
 }
 
-func draftSchema() map[string]any {
+func writeNoloNumericNotation(b *strings.Builder, meldings []db.Melding) {
+	byBid := map[int][]db.Melding{}
+	for _, melding := range meldings {
+		if melding.Type == db.MeldingTypeNolo {
+			byBid[melding.Bid] = append(byBid[melding.Bid], melding)
+		}
+	}
+	if len(byBid) == 0 {
+		b.WriteString("\n")
+		return
+	}
+	bids := make([]int, 0, len(byBid))
+	for bid := range byBid {
+		bids = append(bids, bid)
+	}
+	sort.Ints(bids)
+	b.WriteString("Nolo numeric notation from the club list; when this number is the written melding token, choose this nolo:\n")
+	for _, bid := range bids {
+		names := make([]string, 0, len(byBid[bid]))
+		for _, melding := range byBid[bid] {
+			names = append(names, melding.Name)
+		}
+		sort.Strings(names)
+		fmt.Fprintf(b, " - %d -> %s\n", bid, strings.Join(names, " or "))
+	}
+	b.WriteString("Later trick/result values do not change this nolo choice.\n\n")
+}
+
+func parsedNoteSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"games": map[string]any{
+			"summary": map[string]any{"type": "string"},
+			"notation_assumptions": map[string]any{
+				"type":  "array",
+				"items": map[string]any{"type": "string"},
+			},
+			"player_aliases": map[string]any{
 				"type": "array",
 				"items": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"played_at":    map[string]any{"type": "string", "description": "YYYY-MM-DD eller tom"},
-						"melding_name": map[string]any{"type": "string"},
-						"note":         map[string]any{"type": "string"},
-						"players": map[string]any{
-							"type":     "array",
-							"minItems": 4,
-							"maxItems": 4,
-							"items": map[string]any{
-								"type": "object",
-								"properties": map[string]any{
-									"name":   map[string]any{"type": "string"},
-									"role":   map[string]any{"type": "string", "enum": []string{"melder", "makker", "modspil"}},
-									"tricks": map[string]any{"type": "integer", "minimum": 0, "maximum": 13},
-								},
-								"required":             []string{"name", "role", "tricks"},
-								"additionalProperties": false,
-							},
-						},
+						"alias": map[string]any{"type": "string"},
+						"name":  map[string]any{"type": "string"},
 					},
-					"required":             []string{"melding_name", "players", "played_at", "note"},
+					"required":             []string{"alias", "name"},
+					"additionalProperties": false,
+				},
+			},
+			"rows": map[string]any{
+				"type": "array",
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"source_row": map[string]any{"type": "string"},
+						"decision":   map[string]any{"type": "string", "enum": []string{"game", "skip", "ambiguous"}},
+						"reason":     map[string]any{"type": "string"},
+						"game":       draftGameSchema(0, 4),
+					},
+					"required":             []string{"source_row", "decision", "reason", "game"},
 					"additionalProperties": false,
 				},
 			},
 		},
-		"required":             []string{"games"},
+		"required":             []string{"summary", "notation_assumptions", "player_aliases", "rows"},
 		"additionalProperties": false,
 	}
+}
+
+func draftGameSchema(minPlayers, maxPlayers int) map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"played_at":    map[string]any{"type": "string", "description": "YYYY-MM-DD or empty"},
+			"melding_name": map[string]any{"type": "string"},
+			"note":         map[string]any{"type": "string"},
+			"players": map[string]any{
+				"type":     "array",
+				"minItems": minPlayers,
+				"maxItems": maxPlayers,
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"name":   map[string]any{"type": "string"},
+						"role":   map[string]any{"type": "string", "enum": []string{"melder", "makker", "modspil"}},
+						"tricks": map[string]any{"type": "integer", "minimum": 0, "maximum": 13},
+					},
+					"required":             []string{"name", "role", "tricks"},
+					"additionalProperties": false,
+				},
+			},
+		},
+		"required":             []string{"melding_name", "players", "played_at", "note"},
+		"additionalProperties": false,
+	}
+}
+
+func validateParsedNote(markdown string, parsed parsedNote, meldings []db.Melding, players []db.Player) ([]DraftGame, []string) {
+	var errors []string
+	meldingByName := map[string]db.Melding{}
+	for _, melding := range meldings {
+		meldingByName[melding.Name] = melding
+	}
+	playerNames := map[string]bool{}
+	for _, player := range players {
+		playerNames[player.Name] = true
+	}
+	playerAliases := playerAliasMap(parsed.PlayerAliases, playerNames)
+	for _, player := range players {
+		playerAliases[player.Name] = player.Name
+	}
+
+	sourceRows := meaningfulSourceRows(markdown)
+	accountedRows := make([]string, 0, len(parsed.Rows))
+	seenAccountedRows := map[string]bool{}
+	games := make([]DraftGame, 0, len(parsed.Rows))
+	for i, row := range parsed.Rows {
+		rowRef := fmt.Sprintf("row[%d]", i+1)
+		source := strings.TrimSpace(row.SourceRow)
+		switch row.Decision {
+		case "game", "skip", "ambiguous":
+		default:
+			errors = append(errors, fmt.Sprintf("%s: decision %q must be game, skip, or ambiguous", rowRef, row.Decision))
+		}
+		if source == "" {
+			errors = append(errors, fmt.Sprintf("%s: source_row is empty", rowRef))
+		} else {
+			normalizedSource := normalizeSource(source)
+			if seenAccountedRows[normalizedSource] {
+				errors = append(errors, fmt.Sprintf("%s: duplicate source_row %q", rowRef, source))
+			}
+			seenAccountedRows[normalizedSource] = true
+			accountedRows = append(accountedRows, normalizedSource)
+		}
+		if row.Decision != "game" {
+			continue
+		}
+		game := canonicalizeClearSourceFacts(row.SourceRow, row.Game, meldingByName)
+		if source != "" && !sourceRowCoversMeaningfulLine(source, sourceRows) {
+			errors = append(errors, fmt.Sprintf("%s: game source_row %q does not cover a complete source row", rowRef, source))
+		}
+		if gameErrors := validateDraftGame(rowRef, row.SourceRow, game, meldingByName, playerNames, playerAliases); len(gameErrors) != 0 {
+			errors = append(errors, gameErrors...)
+			continue
+		}
+		games = append(games, game)
+	}
+
+	for _, sourceRow := range sourceRows {
+		normalized := normalizeSource(sourceRow)
+		found := false
+		for _, accounted := range accountedRows {
+			if accounted == normalized || strings.Contains(accounted, normalized) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			errors = append(errors, fmt.Sprintf("source row %q is not accounted for as game, skip, or ambiguous", sourceRow))
+		}
+	}
+
+	return games, errors
+}
+
+func sourceRowCoversMeaningfulLine(source string, sourceRows []string) bool {
+	normalizedSource := normalizeSource(source)
+	for _, sourceRow := range sourceRows {
+		normalizedRow := normalizeSource(sourceRow)
+		if normalizedSource == normalizedRow || strings.Contains(normalizedSource, normalizedRow) {
+			return true
+		}
+	}
+	return false
+}
+
+func canonicalizeClearSourceFacts(sourceRow string, game DraftGame, meldingByName map[string]db.Melding) DraftGame {
+	textual := textualNoloMatches(sourceRow, meldingByName)
+	if len(textual) == 1 {
+		if meldingByName[textual[0]].Type == db.MeldingTypeNolo {
+			game.MeldingName = textual[0]
+		}
+		return game
+	}
+	nums := intsInString(sourceRow)
+	if len(nums) < 2 {
+		return game
+	}
+	var matches []string
+	for name, melding := range meldingByName {
+		if melding.Type == db.MeldingTypeNolo && melding.Bid == nums[0] {
+			matches = append(matches, name)
+		}
+	}
+	if len(matches) == 1 {
+		game.MeldingName = matches[0]
+	}
+	return game
+}
+
+func playerAliasMap(aliases []parsedPlayerAlias, playerNames map[string]bool) map[string]string {
+	out := map[string]string{}
+	for _, alias := range aliases {
+		if alias.Alias == "" || !playerNames[alias.Name] {
+			continue
+		}
+		out[alias.Alias] = alias.Name
+	}
+	return out
+}
+
+func validateDraftGame(rowRef, sourceRow string, game DraftGame, meldingByName map[string]db.Melding, playerNames map[string]bool, playerAliases map[string]string) []string {
+	var errors []string
+	melding, ok := meldingByName[game.MeldingName]
+	if !ok {
+		errors = append(errors, fmt.Sprintf("%s: unknown melding_name %q", rowRef, game.MeldingName))
+	}
+	if len(game.Players) != 4 {
+		errors = append(errors, fmt.Sprintf("%s: has %d players, want 4", rowRef, len(game.Players)))
+	}
+
+	seen := map[string]bool{}
+	roleCounts := map[string]int{}
+	trickSum := 0
+	for _, player := range game.Players {
+		if !playerNames[player.Name] {
+			if looksCombinedPlayerName(player.Name, playerNames) {
+				errors = append(errors, fmt.Sprintf("%s: combined or unknown player name %q; use one exact club player per entry", rowRef, player.Name))
+			} else {
+				errors = append(errors, fmt.Sprintf("%s: unknown player name %q", rowRef, player.Name))
+			}
+		}
+		if seen[player.Name] {
+			errors = append(errors, fmt.Sprintf("%s: duplicate player %q", rowRef, player.Name))
+		}
+		seen[player.Name] = true
+		switch player.Role {
+		case "melder", "makker", "modspil":
+			roleCounts[player.Role]++
+		default:
+			errors = append(errors, fmt.Sprintf("%s: player %q has invalid role %q", rowRef, player.Name, player.Role))
+		}
+		if player.Tricks < 0 || player.Tricks > 13 {
+			errors = append(errors, fmt.Sprintf("%s: player %q has tricks %d, want 0..13", rowRef, player.Name, player.Tricks))
+		}
+		trickSum += player.Tricks
+	}
+	if trickSum != 13 {
+		errors = append(errors, fmt.Sprintf("%s: tricks sum to %d, want 13", rowRef, trickSum))
+	}
+	if roleCounts["melder"] != 1 {
+		errors = append(errors, fmt.Sprintf("%s: melder count is %d, want 1", rowRef, roleCounts["melder"]))
+	}
+	if ok {
+		if roleErrors := validateLeadingRoleAliases(rowRef, sourceRow, game.Players, playerAliases); len(roleErrors) != 0 {
+			errors = append(errors, roleErrors...)
+		}
+		switch melding.Type {
+		case db.MeldingTypeNormal:
+			meldSide := roleTrickSum(game.Players, "melder") + roleTrickSum(game.Players, "makker")
+			if roleCounts["makker"] != 1 {
+				errors = append(errors, fmt.Sprintf("%s: makker count is %d, want 1 for normal melding %q", rowRef, roleCounts["makker"], game.MeldingName))
+			}
+			if roleCounts["modspil"] != 2 {
+				errors = append(errors, fmt.Sprintf("%s: modspil count is %d, want 2 for normal melding %q", rowRef, roleCounts["modspil"], game.MeldingName))
+			}
+			if expected, found := normalMeldSideTricks(sourceRow, melding); found && meldSide != expected {
+				errors = append(errors, fmt.Sprintf("%s: source row implies normal meld-side tricks %d, got %d", rowRef, expected, meldSide))
+			}
+		case db.MeldingTypeNolo:
+			if noloChoiceErrors := validateNoloMeldingChoice(rowRef, sourceRow, game.MeldingName, meldingByName); len(noloChoiceErrors) != 0 {
+				errors = append(errors, noloChoiceErrors...)
+			}
+			if roleCounts["makker"] > 1 {
+				errors = append(errors, fmt.Sprintf("%s: makker count is %d, want 0 or 1 for nolo melding %q", rowRef, roleCounts["makker"], game.MeldingName))
+			}
+			wantModspil := 3 - roleCounts["makker"]
+			if roleCounts["modspil"] != wantModspil {
+				errors = append(errors, fmt.Sprintf("%s: modspil count is %d, want %d for nolo melding %q", rowRef, roleCounts["modspil"], wantModspil, game.MeldingName))
+			}
+			if noloErrors := validateNoloTricks(rowRef, sourceRow, game.Players, roleCounts["makker"]); len(noloErrors) != 0 {
+				errors = append(errors, noloErrors...)
+			}
+		default:
+			errors = append(errors, fmt.Sprintf("%s: melding %q has unknown type %q", rowRef, game.MeldingName, melding.Type))
+		}
+	}
+
+	return errors
+}
+
+func validateLeadingRoleAliases(rowRef, sourceRow string, players []DraftPlayer, playerAliases map[string]string) []string {
+	token := leadingPlayerToken(sourceRow)
+	if token == "" {
+		return nil
+	}
+	aliases, ok := splitAliasToken(token, playerAliases)
+	if !ok || len(aliases) == 0 {
+		return nil
+	}
+	var errors []string
+	if expectedMelder, ok := playerAliases[aliases[0]]; ok {
+		if actualMelder, ok := rolePlayerName(players, "melder"); ok && actualMelder != expectedMelder {
+			errors = append(errors, fmt.Sprintf("%s: source row leading player token implies melder %q, got %q", rowRef, expectedMelder, actualMelder))
+		}
+	}
+	if len(aliases) >= 2 {
+		if expectedMakker, ok := playerAliases[aliases[1]]; ok {
+			if actualMakker, ok := rolePlayerName(players, "makker"); ok && actualMakker != expectedMakker {
+				errors = append(errors, fmt.Sprintf("%s: source row second player token implies makker %q, got %q", rowRef, expectedMakker, actualMakker))
+			}
+		}
+	}
+	return errors
+}
+
+func splitAliasToken(token string, playerAliases map[string]string) ([]string, bool) {
+	type candidate struct {
+		aliases []string
+		ok      bool
+	}
+	memo := map[string]candidate{}
+	var split func(string) candidate
+	split = func(rest string) candidate {
+		if rest == "" {
+			return candidate{ok: true}
+		}
+		if cached, ok := memo[rest]; ok {
+			return cached
+		}
+		keys := make([]string, 0, len(playerAliases))
+		for alias := range playerAliases {
+			if strings.HasPrefix(rest, alias) {
+				keys = append(keys, alias)
+			}
+		}
+		sort.Slice(keys, func(i, j int) bool {
+			if len(keys[i]) == len(keys[j]) {
+				return keys[i] < keys[j]
+			}
+			return len(keys[i]) < len(keys[j])
+		})
+		best := candidate{}
+		for _, alias := range keys {
+			next := split(strings.TrimPrefix(rest, alias))
+			if !next.ok {
+				continue
+			}
+			aliases := append([]string{alias}, next.aliases...)
+			if !best.ok || len(aliases) > len(best.aliases) {
+				best = candidate{aliases: aliases, ok: true}
+			}
+		}
+		memo[rest] = best
+		return best
+	}
+	out := split(token)
+	return out.aliases, out.ok
+}
+
+func leadingPlayerToken(sourceRow string) string {
+	s := strings.TrimSpace(sourceRow)
+	s = strings.TrimLeftFunc(s, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.IsDigit(r) || strings.ContainsRune("-.)]:#|", r)
+	})
+	s = strings.TrimSpace(s)
+	var b strings.Builder
+	for _, r := range s {
+		if !unicode.IsLetter(r) {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func rolePlayerName(players []DraftPlayer, role string) (string, bool) {
+	for _, player := range players {
+		if player.Role == role {
+			return player.Name, true
+		}
+	}
+	return "", false
+}
+
+func validateNoloMeldingChoice(rowRef, sourceRow, selected string, meldingByName map[string]db.Melding) []string {
+	textual := textualNoloMatches(sourceRow, meldingByName)
+	if len(textual) != 0 {
+		for _, name := range textual {
+			if name == selected {
+				return nil
+			}
+		}
+		return []string{fmt.Sprintf("%s: source row text implies nolo melding %q, got %q", rowRef, strings.Join(textual, " or "), selected)}
+	}
+
+	nums := intsInString(sourceRow)
+	if len(nums) < 2 {
+		return nil
+	}
+	var matches []string
+	for name, melding := range meldingByName {
+		if melding.Type == db.MeldingTypeNolo && melding.Bid == nums[0] {
+			matches = append(matches, name)
+		}
+	}
+	if len(matches) == 0 {
+		return nil
+	}
+	sort.Strings(matches)
+	for _, name := range matches {
+		if name == selected {
+			return nil
+		}
+	}
+	return []string{fmt.Sprintf("%s: first numeric nolo token implies %q, got %q", rowRef, strings.Join(matches, " or "), selected)}
+}
+
+func textualNoloMatches(sourceRow string, meldingByName map[string]db.Melding) []string {
+	lower := strings.ToLower(sourceRow)
+	var matches []string
+	longest := 0
+	for name, melding := range meldingByName {
+		if melding.Type != db.MeldingTypeNolo {
+			continue
+		}
+		needle := strings.ToLower(name)
+		if !strings.Contains(lower, needle) {
+			continue
+		}
+		switch {
+		case len(needle) > longest:
+			matches = []string{name}
+			longest = len(needle)
+		case len(needle) == longest:
+			matches = append(matches, name)
+		}
+	}
+	sort.Strings(matches)
+	return matches
+}
+
+func roleTrickSum(players []DraftPlayer, role string) int {
+	sum := 0
+	for _, player := range players {
+		if player.Role == role {
+			sum += player.Tricks
+		}
+	}
+	return sum
+}
+
+func normalMeldSideTricks(sourceRow string, melding db.Melding) (int, bool) {
+	if match := signedResultPattern.FindStringSubmatch(sourceRow); len(match) == 3 {
+		signed := match[2]
+		sign := 1
+		if strings.HasPrefix(signed, "-") {
+			sign = -1
+		}
+		n := 0
+		for _, r := range strings.TrimLeft(signed, "+-") {
+			n = n*10 + int(r-'0')
+		}
+		return melding.Bid + sign*n, true
+	}
+	if strings.Contains(sourceRow, "=") {
+		return melding.Bid, true
+	}
+	nums := intsInString(sourceRow)
+	if len(nums) < 2 {
+		return 0, false
+	}
+	lower := strings.ToLower(sourceRow)
+	if (strings.Contains(lower, "som modspil") || strings.Contains(lower, "as opponent")) && len(nums) >= 3 {
+		return nums[len(nums)-2], true
+	}
+	return nums[len(nums)-1], true
+}
+
+func validateNoloTricks(rowRef, sourceRow string, players []DraftPlayer, makkerCount int) []string {
+	nums := intsInString(sourceRow)
+	if len(nums) == 0 {
+		return nil
+	}
+	var errors []string
+	melderTricks, melderOK := roleTricks(players, "melder")
+	if makkerCount == 0 {
+		expected := nums[len(nums)-1]
+		if melderOK && melderTricks != expected {
+			errors = append(errors, fmt.Sprintf("%s: source row implies nolo melder tricks %d, got %d", rowRef, expected, melderTricks))
+		}
+		return errors
+	}
+	if len(nums) < 2 {
+		return nil
+	}
+	expectedMelder := nums[len(nums)-2]
+	expectedMakker := nums[len(nums)-1]
+	makkerTricks, makkerOK := roleTricks(players, "makker")
+	if melderOK && melderTricks != expectedMelder {
+		errors = append(errors, fmt.Sprintf("%s: source row implies nolo melder tricks %d, got %d", rowRef, expectedMelder, melderTricks))
+	}
+	if makkerOK && makkerTricks != expectedMakker {
+		errors = append(errors, fmt.Sprintf("%s: source row implies nolo makker tricks %d, got %d", rowRef, expectedMakker, makkerTricks))
+	}
+	return errors
+}
+
+func roleTricks(players []DraftPlayer, role string) (int, bool) {
+	for _, player := range players {
+		if player.Role == role {
+			return player.Tricks, true
+		}
+	}
+	return 0, false
+}
+
+func intsInString(s string) []int {
+	matches := integerPattern.FindAllString(s, -1)
+	nums := make([]int, 0, len(matches))
+	for _, match := range matches {
+		n := 0
+		for _, r := range match {
+			n = n*10 + int(r-'0')
+		}
+		nums = append(nums, n)
+	}
+	return nums
+}
+
+func looksCombinedPlayerName(name string, playerNames map[string]bool) bool {
+	if strings.ContainsAny(name, "/&,+") {
+		return true
+	}
+	matches := 0
+	lowerName := strings.ToLower(name)
+	for playerName := range playerNames {
+		if strings.Contains(lowerName, strings.ToLower(playerName)) {
+			matches++
+		}
+	}
+	return matches > 1
+}
+
+func meaningfulSourceRows(markdown string) []string {
+	var rows []string
+	for _, line := range strings.Split(markdown, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || isMarkdownTableSeparator(line) || isLikelyTableHeader(line) {
+			continue
+		}
+		rows = append(rows, line)
+	}
+	return rows
+}
+
+func isMarkdownTableSeparator(line string) bool {
+	trimmed := strings.Trim(line, "| ")
+	if trimmed == "" {
+		return false
+	}
+	for _, r := range trimmed {
+		if r != '-' && r != ':' && r != '|' && r != ' ' {
+			return false
+		}
+	}
+	return strings.Contains(trimmed, "-")
+}
+
+func isLikelyTableHeader(line string) bool {
+	if !strings.Contains(line, "|") {
+		return false
+	}
+	lower := strings.ToLower(line)
+	headerTokens := []string{"runde", "spil", "melder", "makker", "melding", "bud", "stik", "resultat", "res", "søgt"}
+	matches := 0
+	for _, token := range headerTokens {
+		if strings.Contains(lower, token) {
+			matches++
+		}
+	}
+	return matches >= 2
+}
+
+func normalizeSource(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+func validationSummary(errors []string) string {
+	const maxErrors = 8
+	if len(errors) <= maxErrors {
+		return strings.Join(errors, "; ")
+	}
+	return fmt.Sprintf("%s; and %d more", strings.Join(errors[:maxErrors], "; "), len(errors)-maxErrors)
 }
 
 func (c *Client) postJSON(ctx context.Context, path string, body any, out any) error {

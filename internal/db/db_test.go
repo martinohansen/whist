@@ -157,3 +157,111 @@ func TestLeaderboardFilteredOnlyCountsGamesInsideBounds(t *testing.T) {
 		t.Fatalf("filtered games=%d want %d", got, want)
 	}
 }
+
+func TestSettlementsUseGameIDCheckpointsAndKeepSnapshots(t *testing.T) {
+	store := newTestStore(t)
+	club, err := store.CreateClub("Settlement club")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var players []Player
+	for _, name := range []string{"Anna", "Bo", "Carl", "Dorthe"} {
+		p, err := store.AddPlayer(club.ID, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		players = append(players, p)
+	}
+	meldings, err := store.ListMeldings(club.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := []game.PlayerEntry{
+		{PlayerID: players[0].ID, Role: game.RoleMelder, Tricks: 4},
+		{PlayerID: players[1].ID, Role: game.RoleMakker, Tricks: 3},
+		{PlayerID: players[2].ID, Role: game.RoleModspil, Tricks: 3},
+		{PlayerID: players[3].ID, Role: game.RoleModspil, Tricks: 3},
+	}
+	firstID, err := store.AddGame(club.ID, time.Date(2026, time.May, 10, 0, 0, 0, 0, time.UTC), meldings[0], entries, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID, err := store.AddGame(club.ID, time.Date(2026, time.May, 11, 0, 0, 0, 0, time.UTC), meldings[0], entries, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	games, err := store.SettlementGamesSince(club.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	through := games[len(games)-1].ID
+	points, err := store.SettlementPointsBetween(club.ID, 0, through)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if through != secondID {
+		t.Fatalf("first through=%d want %d", through, secondID)
+	}
+	if len(points) != 4 {
+		t.Fatalf("first points rows=%d want 4", len(points))
+	}
+	snapshotRows := make([]SettlementRow, 0, len(points))
+	for _, point := range points {
+		snapshotRows = append(snapshotRows, SettlementRow{
+			PlayerID:    point.PlayerID,
+			PlayerName:  point.PlayerName,
+			PlayerEmoji: point.PlayerEmoji,
+			Points:      point.Points,
+		})
+	}
+	if _, err := store.AddSettlement(club.ID, Settlement{
+		Type:          "points",
+		AmountCents:   40000,
+		FromGameID:    0,
+		ThroughGameID: through,
+		Rows:          snapshotRows,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	thirdID, err := store.AddGame(club.ID, time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC), meldings[0], entries, "baguddateret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	games, err = store.SettlementGamesSince(club.ID, secondID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	through = games[len(games)-1].ID
+	points, err = store.SettlementPointsBetween(club.ID, secondID, through)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if through != thirdID {
+		t.Fatalf("next through=%d want %d", through, thirdID)
+	}
+	if len(points) != 4 {
+		t.Fatalf("next points rows=%d want 4", len(points))
+	}
+
+	updatedEntries := []game.PlayerEntry{
+		{PlayerID: players[0].ID, Role: game.RoleMelder, Tricks: 5},
+		{PlayerID: players[1].ID, Role: game.RoleMakker, Tricks: 4},
+		{PlayerID: players[2].ID, Role: game.RoleModspil, Tricks: 2},
+		{PlayerID: players[3].ID, Role: game.RoleModspil, Tricks: 2},
+	}
+	if err := store.UpdateGame(club.ID, firstID, time.Date(2026, time.May, 10, 0, 0, 0, 0, time.UTC), meldings[1], updatedEntries, "rettet"); err != nil {
+		t.Fatal(err)
+	}
+	history, err := store.ListSettlements(club.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 1 {
+		t.Fatalf("history=%d want 1", len(history))
+	}
+	if got, want := history[0].Rows[0].Points, snapshotRows[0].Points; got != want {
+		t.Fatalf("snapshot points=%d want %d", got, want)
+	}
+}

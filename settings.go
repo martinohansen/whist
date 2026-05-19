@@ -11,13 +11,22 @@ import (
 
 type settingsData struct {
 	layoutData
-	Meldings        []db.Melding
-	Seasons         []db.Season
-	Players         []db.Player
-	EmojiPool       []string
-	PasswordEnabled bool
-	Error           string
-	Success         string
+	Meldings              []db.Melding
+	Seasons               []db.Season
+	Players               []db.Player
+	SettlementExampleRows []settlementExampleRow
+	EmojiPool             []string
+	PasswordEnabled       bool
+	Error                 string
+	Success               string
+}
+
+type settlementExampleRow struct {
+	PlayerID    int
+	PlayerName  string
+	PlayerEmoji string
+	Points      int
+	AmountCents int
 }
 
 func (a *App) handleSettings(w http.ResponseWriter, r *http.Request, club db.Club) {
@@ -40,17 +49,64 @@ func (a *App) renderSettings(w http.ResponseWriter, r *http.Request, club db.Clu
 		http.Error(w, "db error", http.StatusInternalServerError)
 		return
 	}
+	exampleRows, err := a.settlementExampleRows(r, club)
+	if err != nil {
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
 	data := settingsData{
-		layoutData:      a.newLayout(r, club.Name+" — Klubben", clubPath(&club, "settings"), &club),
-		Meldings:        meldings,
-		Seasons:         seasons,
-		Players:         players,
-		EmojiPool:       db.EmojiPool(),
-		PasswordEnabled: club.PasswordOn,
-		Error:           errMsg,
-		Success:         okMsg,
+		layoutData:            a.newLayout(r, club.Name+" — Klubben", clubPath(&club, "settings"), &club),
+		Meldings:              meldings,
+		Seasons:               seasons,
+		Players:               players,
+		SettlementExampleRows: exampleRows,
+		EmojiPool:             db.EmojiPool(),
+		PasswordEnabled:       club.PasswordOn,
+		Error:                 errMsg,
+		Success:               okMsg,
 	}
 	renderTemplate(w, "layout", data, "templates/layout.html", "templates/settings.html")
+}
+
+func (a *App) settlementExampleRows(r *http.Request, club db.Club) ([]settlementExampleRow, error) {
+	ctx, err := a.loadSeasonContext(r, club)
+	if err != nil {
+		return nil, err
+	}
+	players, err := a.store.LeaderboardFiltered(club.ID, seasonFilter(ctx.Selected))
+	if err != nil {
+		return nil, err
+	}
+	settlementRows := make([]settlementRow, 0, len(players))
+	for _, player := range players {
+		if player.Games == 0 {
+			continue
+		}
+		settlementRows = append(settlementRows, settlementRow{
+			PlayerID:    player.ID,
+			PlayerName:  player.Name,
+			PlayerEmoji: player.Emoji,
+			Points:      player.Points,
+		})
+	}
+	if len(settlementRows) == 0 {
+		return nil, nil
+	}
+	calculated, err := calculateSettlementRows(club.DefaultSettlementType, club.DefaultSettlementAmountCents, club.CommonDebtEqualPercent, settlementRows)
+	if err != nil {
+		calculated = settlementRows
+	}
+	out := make([]settlementExampleRow, 0, len(calculated))
+	for _, row := range calculated {
+		out = append(out, settlementExampleRow{
+			PlayerID:    row.PlayerID,
+			PlayerName:  row.PlayerName,
+			PlayerEmoji: row.PlayerEmoji,
+			Points:      row.Points,
+			AmountCents: row.AmountCents,
+		})
+	}
+	return out, nil
 }
 
 func (a *App) handleSaveSettings(w http.ResponseWriter, r *http.Request, club db.Club) {
@@ -74,9 +130,38 @@ func (a *App) handleSaveSettings(w http.ResponseWriter, r *http.Request, club db
 		emoji = db.Emoji(name)
 	}
 	update := db.SettingsUpdate{
-		Name:  name,
-		Emoji: emoji,
-		Rules: r.FormValue("rules"),
+		Name:                         name,
+		Emoji:                        emoji,
+		Rules:                        r.FormValue("rules"),
+		DefaultSettlementType:        club.DefaultSettlementType,
+		DefaultSettlementAmountCents: club.DefaultSettlementAmountCents,
+		CommonDebtEqualPercent:       club.CommonDebtEqualPercent,
+	}
+	if raw := strings.TrimSpace(r.FormValue("default_settlement_type")); raw != "" {
+		defaultSettlementType := normalizeSettlementType(raw)
+		if defaultSettlementType != settlementTypePoints && defaultSettlementType != settlementTypeCommonDebt {
+			a.renderSettings(w, r, club, "Vælg en gyldig standardafregning.", "")
+			return
+		}
+		update.DefaultSettlementType = defaultSettlementType
+	}
+
+	if raw := strings.TrimSpace(r.FormValue("default_settlement_amount")); raw != "" {
+		defaultAmountCents, ok := parseAmountCents(raw)
+		if !ok {
+			a.renderSettings(w, r, club, "Standardbeløb skal være et positivt tal med højst to decimaler.", "")
+			return
+		}
+		update.DefaultSettlementAmountCents = defaultAmountCents
+	}
+
+	if raw := strings.TrimSpace(r.FormValue("common_debt_equal_percent")); raw != "" {
+		commonDebtEqualPercent, err := strconv.Atoi(raw)
+		if err != nil || commonDebtEqualPercent < 0 || commonDebtEqualPercent > 100 {
+			a.renderSettings(w, r, club, "Fælles andel skal være et tal fra 0 til 100.", "")
+			return
+		}
+		update.CommonDebtEqualPercent = commonDebtEqualPercent
 	}
 
 	// Meldings: parallel arrays. Existing rows keep their id so games can keep

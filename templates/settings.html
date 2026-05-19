@@ -21,10 +21,83 @@
       </label>
     </div>
 
+    <p class="muted">
+      Offentlige klubber kræver et kodeord og kan findes via søgning.
+      Private klubber kan ikke findes via søgning, men kan stadig deles
+      via direkte link til klubben.
+    </p>
+    <div class="visibility-row">
+      <div class="visibility-toggle" role="group" aria-label="Synlighed">
+        <input type="radio" name="visibility" id="vis-private" value="private"
+               {{if not .PasswordEnabled}}checked{{end}} />
+        <label for="vis-private">Privat</label>
+        <input type="radio" name="visibility" id="vis-public" value="public"
+               {{if .PasswordEnabled}}checked{{end}} />
+        <label for="vis-public">Offentlig</label>
+      </div>
+      <input type="password" name="password" id="password-input"
+             class="password-input"
+             placeholder="Kodeord"
+             {{if not .PasswordEnabled}}hidden{{end}} />
+    </div>
+
     <h2 class="stat-label">Regler</h2>
     <p class="muted">Skriv klubbens regler og vedtægter her.</p>
     <textarea name="rules" rows="8" class="rules-input"
               placeholder="fx Vi spiller efter aftalte regler …">{{.Club.Rules}}</textarea>
+
+    <h2 class="stat-label">Afregning</h2>
+    <p class="muted">
+      Ved fælles gæld deles den fælles andel ligeligt mellem alle deltagere.
+      Resten fordeles efter hvor langt hver spiller er fra periodens vinder.
+    </p>
+    <div class="settlement-default-fields">
+      <label class="stack">
+        <span>Standardafregning</span>
+        <select name="default_settlement_type" id="default-settlement-type">
+          <option value="points" {{if eq .Club.DefaultSettlementType "points"}}selected{{end}}>Pointafregning</option>
+          <option value="common_debt" {{if eq .Club.DefaultSettlementType "common_debt"}}selected{{end}}>Fælles gæld</option>
+        </select>
+      </label>
+      <label class="stack">
+        <span>Standardbeløb</span>
+        <input type="text" name="default_settlement_amount" id="default-settlement-amount"
+               inputmode="decimal" value="{{amountInput .Club.DefaultSettlementAmountCents}}" required />
+      </label>
+      <label class="stack {{if ne .Club.DefaultSettlementType "common_debt"}}is-disabled{{end}}" id="common-debt-equal-field">
+        <span>Fælles andel (%)</span>
+        <input type="number" name="common_debt_equal_percent" id="common-debt-equal-percent"
+               value="{{.Club.CommonDebtEqualPercent}}" min="0" max="100" required
+               {{if ne .Club.DefaultSettlementType "common_debt"}}disabled{{end}} />
+      </label>
+    </div>
+    {{if .SettlementExampleRows}}
+    <div class="settlement-example stack">
+      <p class="muted" id="settlement-example-label">
+        Eksempel med nuværende stilling.
+      </p>
+      <table class="table settlement-table">
+        <thead>
+          <tr>
+            <th>Spiller</th>
+            <th class="num">Point</th>
+            <th class="num">Betaler</th>
+          </tr>
+        </thead>
+        <tbody id="settlement-example-body">
+          {{range .SettlementExampleRows}}
+          <tr>
+            <td><span>{{.PlayerEmoji}}</span> {{.PlayerName}}</td>
+            <td class="num">{{.Points}}</td>
+            <td class="num" data-example-player="{{.PlayerID}}">{{money .AmountCents}}</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <p class="muted">Når klubben har spil i den valgte periode, vises et eksempel her.</p>
+    {{end}}
 
     <h2 class="stat-label">Meldinger</h2>
     <p class="muted">
@@ -125,27 +198,6 @@
     </div>
     <div class="actions">
       <button type="button" class="ghost settings-add" id="season-add">+ Tilføj periode</button>
-    </div>
-
-    <h2 class="stat-label">Synlighed</h2>
-    <p class="muted">
-      Offentlige klubber kræver et kodeord og kan findes via søgning.
-      Private klubber kan ikke findes via søgning, men kan stadig deles
-      via direkte link til klubben.
-    </p>
-    <div class="visibility-row">
-      <input type="password" name="password" id="password-input"
-             class="password-input"
-             placeholder="Kodeord"
-             {{if not .PasswordEnabled}}hidden{{end}} />
-      <div class="visibility-toggle" role="group" aria-label="Synlighed">
-        <input type="radio" name="visibility" id="vis-public" value="public"
-               {{if .PasswordEnabled}}checked{{end}} />
-        <label for="vis-public">Offentlig</label>
-        <input type="radio" name="visibility" id="vis-private" value="private"
-               {{if not .PasswordEnabled}}checked{{end}} />
-        <label for="vis-private">Privat</label>
-      </div>
     </div>
 
     <div class="actions">
@@ -280,6 +332,134 @@
       }
     });
   });
+
+  // Settlement example: recompute live when the club defaults change.
+  var settlementRows = {{json .SettlementExampleRows}};
+  var settlementTypeInput = document.getElementById("default-settlement-type");
+  var settlementAmountInput = document.getElementById("default-settlement-amount");
+  var commonDebtInput = document.getElementById("common-debt-equal-percent");
+  function formatMoney(cents) {
+    var sign = cents < 0 ? "-" : "";
+    cents = Math.abs(cents);
+    return sign + Math.floor(cents / 100) + "," + String(cents % 100).padStart(2, "0") + " kr.";
+  }
+  function allocate(total, weightedRows) {
+    var sumWeights = weightedRows.reduce(function (sum, row) { return sum + row.weight; }, 0);
+    var out = {};
+    if (sumWeights === 0) return out;
+    var allocated = 0;
+    var remainders = weightedRows.map(function (row, index) {
+      var product = total * row.weight;
+      var cents = Math.floor(product / sumWeights);
+      out[row.PlayerID] = cents;
+      allocated += cents;
+      return {
+        PlayerID: row.PlayerID,
+        order: index,
+        remainder: product % sumWeights,
+      };
+    });
+    remainders.sort(function (a, b) {
+      if (a.remainder !== b.remainder) return b.remainder - a.remainder;
+      return a.order - b.order;
+    });
+    for (var i = 0; i < total - allocated; i++) {
+      out[remainders[i].PlayerID]++;
+    }
+    return out;
+  }
+  function parseAmount(value) {
+    value = (value || "").trim().replace(".", ",");
+    var parts = value.split(",");
+    if (!parts[0] || parts.length > 2) return 0;
+    var kroner = parseInt(parts[0], 10);
+    if (isNaN(kroner) || kroner < 0) return 0;
+    var ore = 0;
+    if (parts.length === 2) {
+      if (!parts[1] || parts[1].length > 2) return 0;
+      var rawOre = parts[1].padEnd(2, "0");
+      ore = parseInt(rawOre, 10);
+      if (isNaN(ore)) return 0;
+    }
+    return kroner * 100 + ore;
+  }
+  function commonDebtAmounts(total, percent) {
+    var percent = parseInt(commonDebtInput.value, 10);
+    if (isNaN(percent)) percent = 0;
+    percent = Math.max(0, Math.min(100, percent));
+    var equalTotal = Math.floor(total * percent / 100);
+    var gapTotal = total - equalTotal;
+    var participants = settlementRows.map(function (row) {
+      return { PlayerID: row.PlayerID, weight: 1 };
+    });
+    var amounts = allocate(equalTotal, participants);
+    var best = settlementRows.reduce(function (max, row) {
+      return Math.max(max, row.Points);
+    }, settlementRows[0].Points);
+    var gaps = settlementRows.map(function (row) {
+      return { PlayerID: row.PlayerID, weight: best - row.Points };
+    });
+    var totalGap = gaps.reduce(function (sum, row) { return sum + row.weight; }, 0);
+    var gapAmounts = allocate(gapTotal, totalGap === 0 ? participants : gaps);
+    settlementRows.forEach(function (row) {
+      amounts[row.PlayerID] = -((amounts[row.PlayerID] || 0) + (gapAmounts[row.PlayerID] || 0));
+    });
+    return amounts;
+  }
+  function pointSettlementAmounts(total) {
+    var positives = [];
+    var negatives = [];
+    settlementRows.forEach(function (row) {
+      if (row.Points > 0) positives.push({ PlayerID: row.PlayerID, weight: row.Points });
+      if (row.Points < 0) negatives.push({ PlayerID: row.PlayerID, weight: -row.Points });
+    });
+    if (!positives.length || !negatives.length) return {};
+    var out = {};
+    var positiveAmounts = allocate(total, positives);
+    var negativeAmounts = allocate(total, negatives);
+    settlementRows.forEach(function (row) {
+      if (positiveAmounts[row.PlayerID]) out[row.PlayerID] = positiveAmounts[row.PlayerID];
+      if (negativeAmounts[row.PlayerID]) out[row.PlayerID] = -negativeAmounts[row.PlayerID];
+    });
+    return out;
+  }
+  function updateSettlementExample() {
+    if (!settlementTypeInput) return;
+    var type = settlementTypeInput.value;
+    updateCommonDebtFieldState(type);
+    if (!settlementRows.length || !settlementAmountInput) return;
+    var total = parseAmount(settlementAmountInput.value);
+    var amounts = type === "common_debt" ? commonDebtAmounts(total) : pointSettlementAmounts(total);
+    var label = document.getElementById("settlement-example-label");
+    if (label) {
+      label.textContent = "Eksempel med nuværende stilling og " +
+        (type === "common_debt" ? "fælles gæld" : "pointafregning") +
+        " på " + formatMoney(total) + ".";
+    }
+    settlementRows.forEach(function (row) {
+      var cell = document.querySelector('[data-example-player="' + row.PlayerID + '"]');
+      if (!cell) return;
+      if (Object.prototype.hasOwnProperty.call(amounts, row.PlayerID)) {
+        cell.textContent = formatMoney(amounts[row.PlayerID]);
+      } else {
+        cell.textContent = "—";
+      }
+    });
+  }
+  [settlementTypeInput, settlementAmountInput, commonDebtInput].forEach(function (input) {
+    if (input) input.addEventListener("input", updateSettlementExample);
+    if (input) input.addEventListener("change", updateSettlementExample);
+  });
+  function updateCommonDebtFieldState(type) {
+    if (!commonDebtInput) return;
+    var field = document.getElementById("common-debt-equal-field");
+    var disabled = type !== "common_debt";
+    commonDebtInput.disabled = disabled;
+    if (field) field.classList.toggle("is-disabled", disabled);
+  }
+  if (settlementTypeInput) {
+    updateSettlementExample();
+  }
 })();
 </script>
 {{end}}

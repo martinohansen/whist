@@ -10,13 +10,16 @@ import (
 // Password is nil when the existing password should be kept, "" when it
 // should be cleared, or a non-empty password when it should be replaced.
 type SettingsUpdate struct {
-	Name     string
-	Emoji    string
-	Rules    string
-	Meldings []Melding
-	Players  []PlayerUpdate
-	Seasons  []SeasonUpdate
-	Password *string
+	Name                         string
+	Emoji                        string
+	Rules                        string
+	DefaultSettlementType        string
+	DefaultSettlementAmountCents int
+	CommonDebtEqualPercent       int
+	Meldings                     []Melding
+	Players                      []PlayerUpdate
+	Seasons                      []SeasonUpdate
+	Password                     *string
 }
 
 type PlayerUpdate struct {
@@ -40,8 +43,13 @@ func (s *Store) UpdateSettings(clubID string, update SettingsUpdate) error {
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec(`UPDATE clubs SET name = ?, emoji = ?, rules = ? WHERE id = ?`,
-		update.Name, update.Emoji, update.Rules, clubID); err != nil {
+	if _, err := tx.Exec(`
+		UPDATE clubs
+		SET name = ?, emoji = ?, rules = ?, default_settlement_type = ?,
+			default_settlement_amount_cents = ?, common_debt_equal_percent = ?
+		WHERE id = ?`,
+		update.Name, update.Emoji, update.Rules, update.DefaultSettlementType,
+		update.DefaultSettlementAmountCents, update.CommonDebtEqualPercent, clubID); err != nil {
 		return err
 	}
 	if update.Password != nil {

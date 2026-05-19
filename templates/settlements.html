@@ -1,0 +1,128 @@
+{{define "content"}}
+<div class="stack">
+  {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+  {{if .Success}}<p class="success">{{.Success}}</p>{{end}}
+
+  <h2 class="stat-label first">Ny afregning</h2>
+  <p class="muted">Afregningen bruger endnu ikke bogførte spil siden seneste bogføring.</p>
+  <form action="/c/{{.Club.ID}}/settlements" method="get" class="stack settlement-form">
+    {{if .SeasonQuery}}<input type="hidden" name="season" value="{{.SeasonID}}" />{{end}}
+    <div class="settlement-controls">
+      <label class="stack">
+        <span>Type</span>
+        <select name="type">
+          <option value="points" {{if eq .Type "points"}}selected{{end}}>Pointafregning</option>
+          <option value="common_debt" {{if eq .Type "common_debt"}}selected{{end}}>Fælles gæld</option>
+        </select>
+      </label>
+      <label class="stack">
+        <span>Samlet beløb</span>
+        <input type="text" name="amount" inputmode="decimal" value="{{.AmountInput}}" placeholder="400,00" />
+      </label>
+      <label class="stack">
+        <span>Til og med spil</span>
+        <select name="through_game_id">
+          {{range .AvailableGames}}
+          <option value="{{.ID}}" {{if eq $.ThroughGameID .ID}}selected{{end}}>#{{.ID}} {{.PlayedAt.Format "2006-01-02"}}</option>
+          {{end}}
+        </select>
+      </label>
+      <button type="submit">Beregn</button>
+    </div>
+  </form>
+
+  <h2 class="stat-label">Preview</h2>
+  {{if .Preview.Rows}}
+  <p class="muted">Fra spil #{{.Preview.FirstGameID}} {{.Preview.FirstGameDate}} til #{{.Preview.ThroughGameID}} {{.Preview.ThroughGameDate}}</p>
+  {{if eq .Type "common_debt"}}
+  <p class="muted">{{.CommonDebtEqualPercent}}% deles ligeligt; resten fordeles efter afstand til vinderen.</p>
+  {{end}}
+  <table class="table settlement-table">
+    <thead>
+      <tr>
+        <th>Spiller</th>
+        <th class="num">Point</th>
+        <th class="num">Beløb</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Preview.Rows}}
+      <tr>
+        <td><span>{{.PlayerEmoji}}</span> {{.PlayerName}}</td>
+        <td class="num">{{.Points}}</td>
+        <td class="num">{{if $.HasAmount}}{{money .AmountCents}}{{else}}—{{end}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{if .HasAmount}}
+  <form action="/c/{{.Club.ID}}/settlements/book" method="post" class="settlement-book-form">
+    {{if .SeasonQuery}}<input type="hidden" name="season" value="{{.SeasonID}}" />{{end}}
+    <input type="hidden" name="type" value="{{.Type}}" />
+    <input type="hidden" name="amount" value="{{.AmountInput}}" />
+    <input type="hidden" name="through_game_id" value="{{.ThroughGameID}}" />
+    <button type="submit">Bogfør</button>
+  </form>
+  {{end}}
+  {{else}}
+  <p><em>Ingen endnu ikke bogførte spil.</em></p>
+  {{end}}
+
+  <h2 class="stat-label">Total</h2>
+  {{if .Totals}}
+  <p class="muted">Samlet bogført i den valgte periode: {{money .TotalAmountCents}}</p>
+  <table class="table settlement-table">
+    <thead>
+      <tr>
+        <th>Spiller</th>
+        <th class="num">Total</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Totals}}
+      <tr>
+        <td><span>{{.PlayerEmoji}}</span> {{.PlayerName}}</td>
+        <td class="num">{{money .AmountCents}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p><em>Ingen bogførte totaler i den valgte periode.</em></p>
+  {{end}}
+
+  <h2 class="stat-label">Historik</h2>
+  {{if .History}}
+    {{range .History}}
+    <section class="settlement-history-item stack">
+      <p class="muted">
+        <strong>{{if eq .Type "points"}}Pointafregning{{else}}Fælles
+        gæld{{end}}</strong> af {{money .AmountCents}} fra spil
+        #{{.FirstGameID}} til #{{.ThroughGameID}} {{.FirstGamePlayedAt.Format
+        "2006-01-02"}}.
+      </p>
+      <table class="table settlement-table">
+        <thead>
+          <tr>
+            <th>Spiller</th>
+            <th class="num">Point</th>
+            <th class="num">Beløb</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{range .Rows}}
+          <tr>
+            <td><span>{{.PlayerEmoji}}</span> {{.PlayerName}}</td>
+            <td class="num">{{.Points}}</td>
+            <td class="num">{{money .AmountCents}}</td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </section>
+    {{end}}
+  {{else}}
+  <p><em>Ingen afregninger bogført endnu.</em></p>
+  {{end}}
+</div>
+{{end}}
